@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Панель | Розподіл заявок</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Розподіл заявок</h1>
+      <div>
+        <span>{{ user.name }} ({{ user.login }})</span>
+        <a class="link" href="{{ url_for('logout') }}">Вийти</a>
+      </div>
+    </header>
+
+    <form method="post" class="card">
+      <input type="hidden" name="action" value="distribute" />
+
+      <label>Напрямок
+        <select name="direction" required>
+          {% for d in directions %}
+            <option value="{{ d }}" {% if d == selected_direction %}selected{% endif %}>{{ d }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <fieldset>
+        <legend>Менеджери</legend>
+        <div class="grid">
+          {% for m in managers %}
+            <label class="checkbox">
+              <input type="checkbox" name="managers" value="{{ m }}" {% if m in selected_managers %}checked{% endif %} />
+              {{ m }}
+            </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <button type="submit">Запустити розподіл (1 цикл)</button>
+    </form>
+
+    {% if distribution_result %}
+      <section class="card">
+        <h2>Результат</h2>
+        <div class="alert {{ distribution_result.status }}">{{ distribution_result.message }}</div>
+      </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Зведення за сьогодні</h2>
+      {% if summary %}
+        <table>
+          <thead><tr><th>Менеджер</th><th>Тип</th><th>К-сть</th></tr></thead>
+          <tbody>
+          {% for manager, types in summary.items() %}
+            {% for deal_type, cnt in types.items() %}
+              <tr>
+                <td>{{ manager }}</td>
+                <td>{{ deal_type }}</td>
+                <td>{{ cnt }}</td>
+              </tr>
+            {% endfor %}
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Ще немає даних за сьогодні.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

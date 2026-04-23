@@ -1,0 +1,18 @@
+body { font-family: Arial, sans-serif; background:#f5f7fb; margin:0; }
+.container { max-width: 980px; margin: 2rem auto; padding: 0 1rem; }
+.narrow { max-width: 420px; }
+.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; }
+.card { background:#fff; border:1px solid #dce3f1; border-radius:12px; padding:1rem; margin-bottom:1rem; }
+label { display:block; margin-bottom:.8rem; }
+input, select { width:100%; margin-top:.35rem; padding:.55rem; }
+button { background:#2563eb; color:#fff; border:none; border-radius:8px; padding:.65rem 1rem; cursor:pointer; }
+.link { margin-left:1rem; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:.5rem; }
+.checkbox { display:flex; align-items:center; gap:.45rem; }
+.checkbox input{ width:auto; margin:0; }
+.alert { padding:.7rem; border-radius:8px; }
+.alert.success { background:#e7f8ec; color:#14532d; }
+.alert.warning { background:#fff4db; color:#92400e; }
+.alert.error { background:#fee2e2; color:#991b1b; }
+table { width:100%; border-collapse:collapse; }
+th, td { border:1px solid #e5e7eb; padding:.5rem; text-align:left; }
