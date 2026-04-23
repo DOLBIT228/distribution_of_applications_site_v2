@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Вхід | Розподіл заявок</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body class="bg">
+  <main class="login-wrap">
+    <section class="card">
+      <h1>📥 Розподіл заявок</h1>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <p class="flash {{ category }}">{{ message }}</p>
+        {% endfor %}
+      {% endif %}
+      {% endwith %}
+      <form method="post" class="stack">
+        <label>Логін<input type="text" name="login" required /></label>
+        <label>Пароль<input type="password" name="password" required /></label>
+        <button type="submit">Увійти</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

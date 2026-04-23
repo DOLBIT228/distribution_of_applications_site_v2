@@ -1,0 +1,14 @@
+body.bg { margin: 0; font-family: Inter, system-ui, Arial, sans-serif; background: linear-gradient(180deg,#f8fbff 0%,#eef5ff 100%); color: #1e2a3a; }
+.container, .login-wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+.card { background: #fff; border: 1px solid #dbe7ff; border-radius: 14px; padding: 16px; box-shadow: 0 6px 18px rgba(27,74,149,.08); margin-bottom: 16px; }
+.stack { display: grid; gap: 10px; }
+.header-row { display: flex; align-items: center; justify-content: space-between; }
+label { display: grid; gap: 6px; font-size: 14px; }
+input, select, button { font: inherit; padding: 10px; border-radius: 10px; border: 1px solid #b9caee; }
+button { cursor: pointer; background: #2855d8; color: #fff; border: none; }
+button.secondary { background: #5d729f; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.grid2 { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.flash.error { color: #b00020; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border-bottom: 1px solid #e2ebff; padding: 8px; text-align: left; }

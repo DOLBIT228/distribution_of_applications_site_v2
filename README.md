@@ -1,14 +1,19 @@
-# 📥 Розподіл заявок Bitrix24 (Streamlit + VPS-ready)
+# 📥 Розподіл заявок Bitrix24 (Streamlit + Flask Web UI + VPS-ready)
 
 Застосунок для авто-розподілу заявок у Bitrix24 між менеджерами.
 
-## Що оновлено для VPS
+Тепер у репозиторії є **два інтерфейси**:
+- `app.py` — поточний Streamlit-інтерфейс.
+- `webapp.py` — веб-інтерфейс на Flask, який працює через URL (зручно для VPS + Nginx).
 
-- Додано папку `onboarding_media/` для завантаження onboarding-відео.
-- `gif-1.webm` переміщено у `onboarding_media/gif-1.webm`.
-- Додано підтримку конфігурації **без `st.secrets`**:
-  - через `.env` для ключів інтеграцій,
-  - через `config/*.json` для списків користувачів/менеджерів/напрямків.
+## Що зберігається на VPS
+
+Усі службові файли для роботи доступні в GitHub, а секрети задаються на VPS:
+- `.env` — секретні ключі/вебхуки (`BITRIX_WEBHOOK_URL`, `FLASK_SECRET_KEY`, тощо).
+- `config/users.json`, `config/managers.json`, `config/directions.json` — робочі конфіги.
+- `distribution_history.db` — локальна SQLite історія розподілу.
+
+> У GitHub тримайте приклади: `.env.example` та `config/*.example.json`.
 
 ---
 
@@ -17,6 +22,12 @@
 ```text
 .
 ├── app.py
+├── webapp.py
+├── templates/
+│   ├── login.html
+│   └── index.html
+├── static/
+│   └── styles.css
 ├── requirements.txt
 ├── .env.example
 ├── config/
@@ -24,7 +35,6 @@
 │   ├── managers.example.json
 │   └── directions.example.json
 ├── onboarding_media/
-│   └── gif-1.webm
 ├── deployment/
 │   └── systemd-distribution.service.example
 └── README.md
@@ -32,20 +42,7 @@
 
 ---
 
-## Конфігурація: пріоритет джерел
-
-1. Якщо є `st.secrets` (Streamlit Cloud) — застосунок читає дані звідти.
-2. Якщо `st.secrets` не задані (VPS) — використовує:
-   - `.env` для:
-     - `BITRIX_WEBHOOK_URL` (обов’язково),
-     - `CHATBOT_WEBHOOK_URL` (опційно),
-     - `TELEGRAM_BOT_TOKEN` (опційно),
-     - `TELEGRAM_CHAT_ID` (опційно).
-   - `config/users.json`, `config/managers.json`, `config/directions.json`.
-
----
-
-## Локальний запуск
+## Локальний запуск (Flask Web UI)
 
 ```bash
 python3 -m venv .venv
@@ -57,14 +54,17 @@ cp config/users.example.json config/users.json
 cp config/managers.example.json config/managers.json
 cp config/directions.example.json config/directions.json
 
-streamlit run app.py
+python webapp.py
 ```
+
+Після запуску інтерфейс доступний на:
+- `http://127.0.0.1:8080`
 
 ---
 
-## Чітка інструкція деплою на VPS (Ubuntu)
+## Деплой Flask-інтерфейсу на VPS (Ubuntu + systemd + Nginx)
 
-### 1) Підготовка сервера
+### 1) Підготовка
 
 ```bash
 sudo apt update
@@ -77,7 +77,7 @@ sudo apt install -y python3 python3-venv python3-pip nginx
 sudo mkdir -p /opt/distribution_of_applications_site_v2
 sudo chown -R $USER:$USER /opt/distribution_of_applications_site_v2
 cd /opt/distribution_of_applications_site_v2
-# Далі скопіюйте/клонуйте проєкт
+# git clone ...
 ```
 
 ### 3) Встановлення залежностей
@@ -89,7 +89,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 4) Налаштування конфігів (заміна Streamlit secrets)
+### 4) Налаштування конфігів
 
 ```bash
 cp .env.example .env
@@ -98,45 +98,44 @@ cp config/managers.example.json config/managers.json
 cp config/directions.example.json config/directions.json
 ```
 
-Потім заповніть:
-- `.env` → мінімум `BITRIX_WEBHOOK_URL`
-- `config/users.json` → логіни/паролі/manager_id
-- `config/managers.json` → менеджери для розподілу
-- `config/directions.json` → funnel/status/logic
+Обовʼязково заповніть:
+- `BITRIX_WEBHOOK_URL`
+- `FLASK_SECRET_KEY`
+- логіни/паролі у `config/users.json`
 
-### 5) Додавання onboarding файлів
+### 5) systemd сервіс (Flask)
 
-Складайте ваші файли в:
+Приклад `distribution.service`:
 
-```text
-onboarding_media/
+```ini
+[Unit]
+Description=Distribution Web App (Flask)
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/distribution_of_applications_site_v2
+EnvironmentFile=/opt/distribution_of_applications_site_v2/.env
+ExecStart=/opt/distribution_of_applications_site_v2/.venv/bin/python webapp.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Наприклад:
-- `onboarding_media/gif-1.webm`
-- `onboarding_media/gif-2.webm`
-- ...
-
-### 6) Запуск як systemd сервіс
+Активація:
 
 ```bash
 sudo cp deployment/systemd-distribution.service.example /etc/systemd/system/distribution.service
-sudo nano /etc/systemd/system/distribution.service
-# за потреби змініть User, WorkingDirectory, ExecStart
-
+# відредагуйте під Flask (ExecStart + порт)
 sudo systemctl daemon-reload
 sudo systemctl enable distribution.service
 sudo systemctl start distribution.service
 sudo systemctl status distribution.service
 ```
 
-### 7) Reverse proxy через Nginx
-
-```bash
-sudo nano /etc/nginx/sites-available/distribution
-```
-
-Приклад конфігу:
+### 6) Nginx reverse proxy (URL доступ)
 
 ```nginx
 server {
@@ -144,42 +143,29 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8501;
+        proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
 }
 ```
 
-Активувати:
-
-```bash
-sudo ln -s /etc/nginx/sites-available/distribution /etc/nginx/sites-enabled/distribution
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-(Опційно) TLS через Certbot.
+Після цього UI доступний за URL домену.
 
 ---
 
-## Що до чого підключати (коротко)
+## Streamlit-режим (за потреби)
 
-- **Bitrix24** → `.env: BITRIX_WEBHOOK_URL`
-- **Користувачі входу в UI** → `config/users.json`
-- **Менеджери для розподілу** → `config/managers.json`
-- **Напрямки/статуси Bitrix** → `config/directions.json`
-- **Чат-бот (опційно)** → `.env` (`CHATBOT_WEBHOOK_URL` або Telegram змінні)
-- **Onboarding відео** → `onboarding_media/*`
+```bash
+streamlit run app.py
+```
 
 ---
 
 ## Важливо
 
-- `distribution_history.db` створюється автоматично поруч із `app.py`.
-- Для продакшну рекомендується щоденний backup БД.
+- `distribution_history.db` створюється автоматично.
+- Рекомендовано робити щоденні backup БД.
