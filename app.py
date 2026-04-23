@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
@@ -48,6 +48,8 @@ DIRECTIONS_CONFIG_PATH = CONFIG_DIR / "directions.json"
 MANAGERS_CONFIG_PATH = CONFIG_DIR / "managers.json"
 
 SITE_DEAL_TYPES = ["Сайт (Тест)"]
+TEAM_LEAD_ROLE = "team_lead"
+MANAGER_ROLE = "manager"
 
 load_dotenv()
 
@@ -92,11 +94,40 @@ def _load_json_list(path: Path, label: str) -> List[Dict]:
     return content
 
 
+def _save_json_list(path: Path, data: List[Dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def normalize_role(role: str | None) -> str:
+    role_value = str(role or "").strip().lower()
+    if role_value in {TEAM_LEAD_ROLE, MANAGER_ROLE}:
+        return role_value
+    return TEAM_LEAD_ROLE
+
+
 def get_config_users() -> List[Dict]:
     users_from_secrets = _secret_optional("auth.users")
     if users_from_secrets:
         return list(users_from_secrets)
     return _load_json_list(USERS_CONFIG_PATH, "конфігурацію користувачів")
+
+
+def get_users_config_source() -> Tuple[List[Dict], str]:
+    users_from_secrets = _secret_optional("auth.users")
+    if users_from_secrets:
+        return list(users_from_secrets), "secrets"
+    return _load_json_list(USERS_CONFIG_PATH, "конфігурацію користувачів"), "file"
+
+
+def get_managers_config_source() -> Tuple[List[Dict], str]:
+    managers_from_secrets = _secret_optional("managers")
+    if managers_from_secrets:
+        return list(managers_from_secrets), "secrets"
+    return _load_json_list(MANAGERS_CONFIG_PATH, "конфігурацію менеджерів"), "file"
 
 
 def get_bitrix_webhook_url() -> str:
@@ -126,6 +157,7 @@ def get_auth_user(login: str, password: str) -> Optional[Dict]:
                 "login": str(user["login"]),
                 "name": str(user.get("name") or user["login"]),
                 "manager_id": int(user["manager_id"]),
+                "role": normalize_role(str(user.get("role") or TEAM_LEAD_ROLE)),
             }
     return None
 
@@ -227,6 +259,49 @@ def get_managers_config() -> Dict[str, int]:
     if not managers:
         managers = _load_json_list(MANAGERS_CONFIG_PATH, "конфігурацію менеджерів")
     return {str(item["name"]): int(item["id"]) for item in managers}
+
+
+def add_manager_account(name: str, login: str, password: str, bitrix_id: int) -> Tuple[bool, str]:
+    users, users_source = get_users_config_source()
+    managers, managers_source = get_managers_config_source()
+
+    if users_source != "file" or managers_source != "file":
+        return (
+            False,
+            "Додавання недоступне, якщо користувачі/менеджери задані через Streamlit secrets. "
+            "Перенесіть конфіг у config/users.json та config/managers.json.",
+        )
+
+    name_clean = str(name).strip()
+    login_clean = str(login).strip()
+    password_clean = str(password).strip()
+
+    if not name_clean or not login_clean or not password_clean:
+        return False, "Заповніть усі поля: ім'я, логін, пароль та ID Bitrix24."
+
+    if any(str(item.get("login", "")).strip().lower() == login_clean.lower() for item in users):
+        return False, "Користувач з таким логіном вже існує."
+
+    if any(str(item.get("name", "")).strip().lower() == name_clean.lower() for item in managers):
+        return False, "Менеджер з таким ім'ям вже існує."
+
+    if any(int(item.get("id", 0)) == int(bitrix_id) for item in managers):
+        return False, "Менеджер з таким Bitrix24 ID вже існує."
+
+    users.append(
+        {
+            "login": login_clean,
+            "password": password_clean,
+            "name": name_clean,
+            "manager_id": int(bitrix_id),
+            "role": MANAGER_ROLE,
+        }
+    )
+    managers.append({"name": name_clean, "id": int(bitrix_id)})
+
+    _save_json_list(USERS_CONFIG_PATH, users)
+    _save_json_list(MANAGERS_CONFIG_PATH, managers)
+    return True, f"Менеджера «{name_clean}» успішно додано."
 
 
 def init_db() -> None:
@@ -789,10 +864,13 @@ def login_screen() -> None:
 def distribution_screen() -> None:
     user = st.session_state.get("user", {})
     user_login = str(user.get("login") or "")
+    user_role = normalize_role(str(user.get("role") or TEAM_LEAD_ROLE))
+    is_team_lead = user_role == TEAM_LEAD_ROLE
 
     st.title("Розподіл заявок між менеджерами")
     st.caption(
-        f"Користувач: {user.get('name', '-')} | ID менеджера акаунта: {user.get('manager_id', '-')}")
+        f"Користувач: {user.get('name', '-')} | Роль: {'Team Lead' if is_team_lead else 'Manager'} | ID менеджера акаунта: {user.get('manager_id', '-')}"
+    )
 
     top_actions_col1, top_actions_col2, top_actions_col3 = st.columns([1, 1, 6])
     with top_actions_col1:
@@ -807,6 +885,28 @@ def distribution_screen() -> None:
 
     direction_options = get_direction_config()
     manager_options = get_managers_config()
+
+    if is_team_lead:
+        with st.expander("Додати нового менеджера", expanded=False):
+            with st.form("add_manager_form", clear_on_submit=True):
+                new_manager_name = st.text_input("Ім'я менеджера")
+                new_manager_login = st.text_input("Логін")
+                new_manager_password = st.text_input("Пароль", type="password")
+                new_manager_bitrix_id = st.number_input("ID з Bitrix24", min_value=1, step=1)
+                add_manager_submitted = st.form_submit_button("Додати менеджера")
+
+                if add_manager_submitted:
+                    ok, message = add_manager_account(
+                        name=new_manager_name,
+                        login=new_manager_login,
+                        password=new_manager_password,
+                        bitrix_id=int(new_manager_bitrix_id),
+                    )
+                    if ok:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
 
     if "auto_distribution_state" not in st.session_state:
         st.session_state["auto_distribution_state"] = "stopped"
@@ -851,7 +951,19 @@ def distribution_screen() -> None:
     target_stage_id = in_progress_stage_id or next_stage_id
     distribution_logic = get_direction_logic(direction_name, direction)
     deal_types = get_deal_types_for_logic(distribution_logic)
-    batch_size = int(direction.get("batch_size") or DEFAULT_BATCH_SIZE)
+    configured_batch_size = int(direction.get("batch_size") or DEFAULT_BATCH_SIZE)
+    if is_team_lead:
+        batch_size = int(
+            st.number_input(
+                "Розмір пачки для розподілу (ціль «в роботі» на менеджера)",
+                min_value=1,
+                value=configured_batch_size,
+                step=1,
+            )
+        )
+    else:
+        batch_size = configured_batch_size
+        st.caption(f"Поточний розмір пачки: {batch_size}")
     auto_interval_seconds = int(direction.get("auto_interval_seconds") or 30)
 
     if not target_stage_id:
@@ -1090,13 +1202,14 @@ def distribution_screen() -> None:
         else:
             st.info("Оберіть менеджерів, щоб побачити таблицю навантаження.")
 
-    if st.button("Очистити значення", type="secondary"):
-        deleted_rows = clear_daily_distribution(direction_name)
-        if deleted_rows:
-            st.success(f"Очищено записів: {deleted_rows}. Історію розподілу за сьогодні скинуто.")
-        else:
-            st.info("Немає значень для очищення за сьогодні у цьому напрямку.")
-        st.rerun()
+    if is_team_lead:
+        if st.button("Очистити значення", type="secondary"):
+            deleted_rows = clear_daily_distribution(direction_name)
+            if deleted_rows:
+                st.success(f"Очищено записів: {deleted_rows}. Історію розподілу за сьогодні скинуто.")
+            else:
+                st.info("Немає значень для очищення за сьогодні у цьому напрямку.")
+            st.rerun()
 
     if should_autorefresh:
         time.sleep(auto_interval_seconds)

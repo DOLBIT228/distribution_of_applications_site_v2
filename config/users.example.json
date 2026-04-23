@@ -3,6 +3,14 @@
     "login": "admin",
     "password": "change_me",
     "name": "Адміністратор",
-    "manager_id": 1
+    "manager_id": 1,
+    "role": "team_lead"
+  },
+  {
+    "login": "manager_1",
+    "password": "change_me_manager",
+    "name": "Менеджер 1",
+    "manager_id": 2,
+    "role": "manager"
   }
 ]
