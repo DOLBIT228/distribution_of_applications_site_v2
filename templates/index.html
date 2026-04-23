@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Розподіл заявок</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body class="bg">
+  <main class="container">
+    <header class="header-row card">
+      <div>
+        <h1>📥 Розподіл заявок</h1>
+        <p>Користувач: <strong>{{ user_name }}</strong></p>
+      </div>
+      <form method="post" action="{{ url_for('logout') }}">
+        <button type="submit" class="secondary">Вийти</button>
+      </form>
+    </header>
+
+    <section class="card stack">
+      <h2>Панель керування</h2>
+      <label>Напрямок
+        <select id="direction">
+          {% for name, cfg in directions.items() %}
+            <option value="{{ name }}" {% if selected_direction == name %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Batch size
+        <input id="batch_size" type="number" min="1" value="{{ directions[selected_direction]['batch_size'] }}" />
+      </label>
+      <fieldset>
+        <legend>Менеджери</legend>
+        <div class="grid2" id="managers">
+          {% for manager_name, manager_id in managers.items() %}
+          <label><input type="checkbox" value="{{ manager_name }}" checked /> {{ manager_name }} (ID: {{ manager_id }})</label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <div class="actions">
+        <button id="run_once">Розподілити зараз</button>
+        <button id="start_auto" class="secondary">Почати авто-розподіл</button>
+        <button id="pause_auto" class="secondary">Пауза</button>
+      </div>
+      <p id="status">Готово до роботи.</p>
+    </section>
+
+    <section class="card">
+      <h2>Поточний підсумок за день</h2>
+      <table id="summary_table">
+        <thead>
+          <tr>
+            <th>Менеджер</th>
+            {% for deal_type in deal_types %}<th>{{ deal_type }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for manager_name, _ in managers.items() %}
+            <tr>
+              <td>{{ manager_name }}</td>
+              {% for deal_type in deal_types %}
+              <td>{{ summary.get(manager_name, {}).get(deal_type, 0) }}</td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const runBtn = document.getElementById('run_once');
+    const startBtn = document.getElementById('start_auto');
+    const pauseBtn = document.getElementById('pause_auto');
+    let timer = null;
+
+    function selectedManagers() {
+      return Array.from(document.querySelectorAll('#managers input:checked')).map((el) => el.value);
+    }
+
+    function updateSummary(summary) {
+      if (!summary) return;
+      const table = document.getElementById('summary_table').querySelector('tbody');
+      for (const row of table.rows) {
+        const manager = row.cells[0].textContent.trim();
+        for (let i = 1; i < row.cells.length; i++) {
+          const dealType = document.querySelector(`#summary_table thead tr th:nth-child(${i+1})`).textContent.trim();
+          row.cells[i].textContent = summary?.[manager]?.[dealType] ?? 0;
+        }
+      }
+    }
+
+    async function runOnce() {
+      const payload = {
+        direction: document.getElementById('direction').value,
+        batch_size: Number(document.getElementById('batch_size').value || 3),
+        managers: selectedManagers(),
+      };
+      statusEl.textContent = 'Виконується...';
+      const res = await fetch('/api/distribute-once', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      statusEl.textContent = data.message || 'Готово';
+      updateSummary(data.summary);
+    }
+
+    runBtn.addEventListener('click', runOnce);
+    startBtn.addEventListener('click', () => {
+      if (timer) return;
+      timer = setInterval(runOnce, 30000);
+      statusEl.textContent = 'Авто-розподіл увімкнено (кожні 30 сек).';
+    });
+    pauseBtn.addEventListener('click', () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      statusEl.textContent = 'Пауза авто-розподілу.';
+    });
+  </script>
+</body>
+</html>
