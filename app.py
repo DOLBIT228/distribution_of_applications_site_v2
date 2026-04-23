@@ -3,12 +3,15 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 import base64
+import json
+import os
 import sqlite3
 import time
 from typing import Dict, List, Optional
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 
 
 st.set_page_config(page_title="Розподіл заявок", page_icon="📥", layout="wide")
@@ -39,21 +42,21 @@ DB_PATH = "distribution_history.db"
 DASHBOARD_URL = "https://panel-for-manager-call.streamlit.app/"
 DEFAULT_BATCH_SIZE = 3
 ONBOARDING_MEDIA_DIR = Path("onboarding_media")
+CONFIG_DIR = Path("config")
+USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
+DIRECTIONS_CONFIG_PATH = CONFIG_DIR / "directions.json"
+MANAGERS_CONFIG_PATH = CONFIG_DIR / "managers.json"
 
 SITE_DEAL_TYPES = ["Сайт (Тест)"]
 
-
-def _secret_required(path: str):
-    cursor = st.secrets
-    for key in path.split("."):
-        if key not in cursor:
-            raise KeyError(f"Відсутній секрет: {path}")
-        cursor = cursor[key]
-    return cursor
+load_dotenv()
 
 
 def _secret_optional(path: str, default=None):
-    cursor = st.secrets
+    try:
+        cursor = st.secrets
+    except Exception:
+        return default
     for key in path.split("."):
         if key not in cursor:
             return default
@@ -61,8 +64,62 @@ def _secret_optional(path: str, default=None):
     return cursor
 
 
+def _secret_required(path: str):
+    value = _secret_optional(path, None)
+    if value is None:
+        raise KeyError(f"Відсутній секрет: {path}")
+    return value
+
+
+def _env_required(key: str) -> str:
+    value = str(os.getenv(key, "") or "").strip()
+    if not value:
+        raise KeyError(f"Відсутня env-змінна: {key}")
+    return value
+
+
+def _load_json_list(path: Path, label: str) -> List[Dict]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Не знайдено {label}: {path.as_posix()}. Створіть файл або додайте дані у Streamlit secrets."
+        )
+    try:
+        content = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Некоректний JSON у {path.as_posix()}: {exc}") from exc
+    if not isinstance(content, list):
+        raise ValueError(f"Очікується список об'єктів у {path.as_posix()}")
+    return content
+
+
+def get_config_users() -> List[Dict]:
+    users_from_secrets = _secret_optional("auth.users")
+    if users_from_secrets:
+        return list(users_from_secrets)
+    return _load_json_list(USERS_CONFIG_PATH, "конфігурацію користувачів")
+
+
+def get_bitrix_webhook_url() -> str:
+    from_secrets = str(_secret_optional("bitrix.webhook_url", "") or "").strip()
+    if from_secrets:
+        return from_secrets
+    return _env_required("BITRIX_WEBHOOK_URL")
+
+
+def get_chatbot_config() -> Dict[str, str]:
+    return {
+        "webhook_url": str(_secret_optional("chatbot.webhook_url", "") or os.getenv("CHATBOT_WEBHOOK_URL", "")).strip(),
+        "telegram_bot_token": str(
+            _secret_optional("chatbot.telegram_bot_token", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        ).strip(),
+        "telegram_chat_id": str(
+            _secret_optional("chatbot.telegram_chat_id", "") or os.getenv("TELEGRAM_CHAT_ID", "")
+        ).strip(),
+    }
+
+
 def get_auth_user(login: str, password: str) -> Optional[Dict]:
-    users = _secret_required("auth.users")
+    users = get_config_users()
     for user in users:
         if str(user["login"]) == login and str(user["password"]) == password:
             return {
@@ -74,7 +131,7 @@ def get_auth_user(login: str, password: str) -> Optional[Dict]:
 
 
 def bitrix_request(method: str, payload: Dict) -> Dict:
-    base_url = _secret_required("bitrix.webhook_url").rstrip("/")
+    base_url = get_bitrix_webhook_url().rstrip("/")
     response = requests.post(f"{base_url}/{method}.json", json=payload, timeout=30)
     response.raise_for_status()
     data = response.json()
@@ -159,12 +216,16 @@ def update_deal_assignment_and_stage(deal_id: int, manager_id: int, next_stage_i
 
 
 def get_direction_config() -> Dict[str, Dict]:
-    directions = _secret_required("directions")
+    directions = _secret_optional("directions")
+    if not directions:
+        directions = _load_json_list(DIRECTIONS_CONFIG_PATH, "конфігурацію напрямків")
     return {item["name"]: item for item in directions}
 
 
 def get_managers_config() -> Dict[str, int]:
-    managers = _secret_required("managers")
+    managers = _secret_optional("managers")
+    if not managers:
+        managers = _load_json_list(MANAGERS_CONFIG_PATH, "конфігурацію менеджерів")
     return {str(item["name"]): int(item["id"]) for item in managers}
 
 
@@ -322,9 +383,10 @@ def build_stop_report_message(
 
 
 def send_chatbot_message(text: str) -> None:
-    webhook_url = str(_secret_optional("chatbot.webhook_url", "") or "").strip()
-    telegram_token = str(_secret_optional("chatbot.telegram_bot_token", "") or "").strip()
-    telegram_chat_id = str(_secret_optional("chatbot.telegram_chat_id", "") or "").strip()
+    chatbot_cfg = get_chatbot_config()
+    webhook_url = chatbot_cfg["webhook_url"]
+    telegram_token = chatbot_cfg["telegram_bot_token"]
+    telegram_chat_id = chatbot_cfg["telegram_chat_id"]
 
     try:
         if webhook_url:

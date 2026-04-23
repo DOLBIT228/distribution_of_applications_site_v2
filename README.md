@@ -1,216 +1,185 @@
-# 📥 Розподіл заявок Bitrix24 (Streamlit)
+# 📥 Розподіл заявок Bitrix24 (Streamlit + VPS-ready)
 
-Локальний веб-інструмент на **Streamlit** для автоматизованого та контрольованого розподілу вхідних заявок у **Bitrix24 CRM** між менеджерами.
+Застосунок для авто-розподілу заявок у Bitrix24 між менеджерами.
 
-Проєкт допомагає:
-- уникати ручного «перекидання» заявок,
-- тримати навантаження менеджерів збалансованим,
-- фіксувати денну історію видачі заявок,
-- надсилати сповіщення про старт/паузу/зупинку розподілу у чат-бот.
+## Що оновлено для VPS
 
----
-
-## 🚀 Основні можливості
-
-- **Авторизація в UI** через локальні облікові дані зі `st.secrets`.
-- **Інтеграція з Bitrix24 через webhook**, без прямого входу у CRM в інтерфейсі застосунку.
-- **Підтримка кількох напрямків (воронок)** з окремими налаштуваннями:
-  - `funnel_id`,
-  - `status_id` (звідки брати заявки),
-  - `next_status_id` / `in_progress_status_id` (куди переводити).
-- **Автоматичний цикл авто-розподілу** з інтервалом перевірки (наприклад, кожні 30 сек).
-- **Розподіл пачками** (`batch_size`) — по N заявок на одного вільного менеджера за цикл.
-- **Перевірка зайнятості менеджера**:
-  - якщо в менеджера є активні угоди у статусі `in_progress_status_id`, нові заявки йому тимчасово не видаються;
-  - коли активних угод 0 — менеджер знову потрапляє в розподіл.
-- **Оновлення угоди в Bitrix24** під час розподілу:
-  - `ASSIGNED_BY_ID` (відповідальний),
-  - `STAGE_ID` (переведення у наступний статус).
-- **Гнучка логіка розподілу за напрямком**:
-  - `site` — класифікація заявок на `Сайт`/`Лендинг` з балансуванням за типами;
-  - `instagram` — загальне рівномірне балансування типу `Інстаграм`.
-- **Локальна історія розподілу** за день у SQLite (`distribution_history.db`).
-- **Звітність в інтерфейсі**:
-  - таблиця розподілу за поточний день,
-  - завантаженість менеджерів («в роботі»).
-- **Сповіщення у чат-бот** при:
-  - старті авто-режиму,
-  - постановці на паузу (із причиною),
-  - зупинці (із причиною + підсумковим звітом).
+- Додано папку `onboarding_media/` для завантаження onboarding-відео.
+- `gif-1.webm` переміщено у `onboarding_media/gif-1.webm`.
+- Додано підтримку конфігурації **без `st.secrets`**:
+  - через `.env` для ключів інтеграцій,
+  - через `config/*.json` для списків користувачів/менеджерів/напрямків.
 
 ---
 
-## 🧱 Стек технологій
-
-- **Python 3.10+**
-- **Streamlit** — UI та стан сесії
-- **Requests** — HTTP-запити до Bitrix24 і чат-бота
-- **SQLite3** — локальне збереження щоденної історії розподілу
-
----
-
-## 📂 Структура проєкту
+## Структура проєкту
 
 ```text
 .
-├── app.py                  # основний Streamlit-застосунок
-├── requirements.txt        # залежності Python
-└── README.md               # документація
+├── app.py
+├── requirements.txt
+├── .env.example
+├── config/
+│   ├── users.example.json
+│   ├── managers.example.json
+│   └── directions.example.json
+├── onboarding_media/
+│   └── gif-1.webm
+├── deployment/
+│   └── systemd-distribution.service.example
+└── README.md
 ```
-
-Після першого запуску поруч із кодом автоматично створюється файл:
-
-- `distribution_history.db` — SQLite БД з таблицею `distribution_history`.
 
 ---
 
-## ⚙️ Налаштування
+## Конфігурація: пріоритет джерел
 
-### 1) Встановіть залежності
+1. Якщо є `st.secrets` (Streamlit Cloud) — застосунок читає дані звідти.
+2. Якщо `st.secrets` не задані (VPS) — використовує:
+   - `.env` для:
+     - `BITRIX_WEBHOOK_URL` (обов’язково),
+     - `CHATBOT_WEBHOOK_URL` (опційно),
+     - `TELEGRAM_BOT_TOKEN` (опційно),
+     - `TELEGRAM_CHAT_ID` (опційно).
+   - `config/users.json`, `config/managers.json`, `config/directions.json`.
+
+---
+
+## Локальний запуск
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2) Підготуйте секрети Streamlit
+cp .env.example .env
+cp config/users.example.json config/users.json
+cp config/managers.example.json config/managers.json
+cp config/directions.example.json config/directions.json
 
-Створіть файл `.streamlit/secrets.toml` (наприклад, на основі вашого шаблону `.streamlit/secrets.toml.example`, якщо він є у вашому оточенні).
-
-### 3) Заповніть обов’язкові секції
-
-#### `bitrix`
-- `webhook_url` — webhook URL для REST API Bitrix24.
-
-#### `auth.users`
-Список користувачів, які можуть увійти в UI.
-Кожен елемент має містити:
-- `login`
-- `password`
-- `manager_id`
-- (опційно) `name`
-
-#### `directions`
-Список напрямків/воронок розподілу.
-Для кожного напрямку:
-- `name` — назва в UI,
-- `funnel_id` — ID воронки,
-- `status_id` — статус, з якого беруться заявки,
-- `next_status_id` — статус після розподілу,
-- `in_progress_status_id` — статус «в роботі» для контролю зайнятості,
-- `distribution_logic` — `site` або `instagram` (опційно, може бути визначено автоматично з назви),
-- `batch_size` — розмір пачки (опційно, за замовчуванням `3`),
-- `auto_interval_seconds` — інтервал авто-перевірки (опційно, за замовчуванням `30`).
-
-#### `managers`
-Список менеджерів, між якими виконується розподіл:
-- `name`
-- `id`
-
-### 4) (Опційно) Налаштуйте `chatbot`
-
-Підтримуються 2 варіанти:
-
-1. Власний webhook:
-- `chatbot.webhook_url`
-
-2. Прямий Telegram Bot API:
-- `chatbot.telegram_bot_token`
-- `chatbot.telegram_chat_id`
-
-> Якщо бот недоступний, це **не блокує** основний процес розподілу.
-
----
-
-## ▶️ Запуск
-
-```bash
 streamlit run app.py
 ```
 
-Після старту:
-1. Увійдіть за логіном/паролем із `auth.users`.
-2. Оберіть напрямок.
-3. Оберіть менеджерів для розподілу.
-4. Натисніть **«Почати авто-розподіл»**.
+---
+
+## Чітка інструкція деплою на VPS (Ubuntu)
+
+### 1) Підготовка сервера
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip nginx
+```
+
+### 2) Розміщення проєкту
+
+```bash
+sudo mkdir -p /opt/distribution_of_applications_site_v2
+sudo chown -R $USER:$USER /opt/distribution_of_applications_site_v2
+cd /opt/distribution_of_applications_site_v2
+# Далі скопіюйте/клонуйте проєкт
+```
+
+### 3) Встановлення залежностей
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 4) Налаштування конфігів (заміна Streamlit secrets)
+
+```bash
+cp .env.example .env
+cp config/users.example.json config/users.json
+cp config/managers.example.json config/managers.json
+cp config/directions.example.json config/directions.json
+```
+
+Потім заповніть:
+- `.env` → мінімум `BITRIX_WEBHOOK_URL`
+- `config/users.json` → логіни/паролі/manager_id
+- `config/managers.json` → менеджери для розподілу
+- `config/directions.json` → funnel/status/logic
+
+### 5) Додавання onboarding файлів
+
+Складайте ваші файли в:
+
+```text
+onboarding_media/
+```
+
+Наприклад:
+- `onboarding_media/gif-1.webm`
+- `onboarding_media/gif-2.webm`
+- ...
+
+### 6) Запуск як systemd сервіс
+
+```bash
+sudo cp deployment/systemd-distribution.service.example /etc/systemd/system/distribution.service
+sudo nano /etc/systemd/system/distribution.service
+# за потреби змініть User, WorkingDirectory, ExecStart
+
+sudo systemctl daemon-reload
+sudo systemctl enable distribution.service
+sudo systemctl start distribution.service
+sudo systemctl status distribution.service
+```
+
+### 7) Reverse proxy через Nginx
+
+```bash
+sudo nano /etc/nginx/sites-available/distribution
+```
+
+Приклад конфігу:
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8501;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Активувати:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/distribution /etc/nginx/sites-enabled/distribution
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+(Опційно) TLS через Certbot.
 
 ---
 
-## 🧠 Логіка розподілу (детально)
+## Що до чого підключати (коротко)
 
-### 1) Вибір заявок
-Застосунок отримує всі угоди у вказаній парі:
-- `CATEGORY_ID = funnel_id`
-- `STAGE_ID = status_id`
-
-### 2) Перевірка доступності менеджерів
-Для кожного обраного менеджера перевіряється кількість угод у `in_progress_status_id`.
-- Якщо кількість > 0 — менеджер тимчасово недоступний.
-- Якщо 0 — бере участь у поточному циклі.
-
-### 3) Визначення обсягу на цикл
-Максимальна кількість угод на один цикл:
-
-`кількість_вільних_менеджерів × batch_size`
-
-### 4) Призначення менеджера
-- Для `instagram`: балансування за загальною кількістю виданих заявок.
-- Для `site`: враховується тип заявки (`Сайт`/`Лендинг`) та попередній тип, щоб вирівнювати навантаження м’якше.
-
-### 5) Оновлення угоди
-Після вибору менеджера застосунок викликає `crm.deal.update` і оновлює:
-- `ASSIGNED_BY_ID`
-- `STAGE_ID`
-
-### 6) Логування в БД
-Кожна розподілена заявка записується в SQLite для подальшої денної аналітики.
+- **Bitrix24** → `.env: BITRIX_WEBHOOK_URL`
+- **Користувачі входу в UI** → `config/users.json`
+- **Менеджери для розподілу** → `config/managers.json`
+- **Напрямки/статуси Bitrix** → `config/directions.json`
+- **Чат-бот (опційно)** → `.env` (`CHATBOT_WEBHOOK_URL` або Telegram змінні)
+- **Onboarding відео** → `onboarding_media/*`
 
 ---
 
-## 🗃️ Локальна база даних
+## Важливо
 
-Таблиця `distribution_history` містить:
-- `distribution_date`
-- `direction_name`
-- `manager_name`
-- `deal_type`
-- `deal_id`
-
-Використання:
-- побудова щоденної таблиці розподілу,
-- формування звіту при зупинці авто-режиму,
-- контроль статистики за менеджером і типом заявок.
-
----
-
-## 🔔 Події авто-режиму та сповіщення
-
-- **Старт**: надсилається повідомлення з напрямком, користувачем, списком менеджерів.
-- **Пауза**: обов’язково потрібно вказати причину.
-- **Зупинка**: обов’язково потрібно вказати причину + формується звіт за день.
-
----
-
-## 🛡️ Важливі зауваження
-
-- Використовуйте **технічні ID статусів** Bitrix24 (приклад: `NEW`, `C2:NEW`).
-- Якщо для напрямку не задано `in_progress_status_id`, застосунок використовує `next_status_id` як резервний цільовий статус.
-- Розподіл працює лише для тих напрямків/статусів, що вказані у `secrets.toml`.
-- Файл `distribution_history.db` зберігається локально — подбайте про резервне копіювання за потреби.
-
----
-
-## 🧪 Рекомендації для експлуатації
-
-- Додайте окремого технічного користувача Bitrix24 для webhook-доступу.
-- Перевірте права webhook на читання/оновлення угод.
-- Починайте з малого `batch_size` (2–3), а потім адаптуйте під навантаження.
-- Регулярно перевіряйте коректність `SOURCE_ID` → тип заявок (особливо для логіки `site`).
-
----
-
-## 📌 Можливі покращення
-
-- Винесення конфігурації в адмін-панель (без редагування `secrets.toml`).
-- Розширена аналітика (тижнева/місячна) поверх SQLite або зовнішньої БД.
-- Ролі доступу (адмін/супервайзер/оператор).
-- Retry/Backoff для API-запитів Bitrix24.
+- `distribution_history.db` створюється автоматично поруч із `app.py`.
+- Для продакшну рекомендується щоденний backup БД.

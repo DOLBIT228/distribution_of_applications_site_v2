@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Сайт (Тест)",
+    "funnel_id": 2,
+    "status_id": "C2:NEW",
+    "next_status_id": "C2:PREPAYMENT_INVOICE",
+    "in_progress_status_id": "C2:PREPAYMENT_INVOICE",
+    "distribution_logic": "site",
+    "batch_size": 3,
+    "auto_interval_seconds": 30
+  }
+]

@@ -1,0 +1,8 @@
+[
+  {
+    "login": "admin",
+    "password": "change_me",
+    "name": "Адміністратор",
+    "manager_id": 1
+  }
+]
