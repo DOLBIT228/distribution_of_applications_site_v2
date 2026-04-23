@@ -106,7 +106,7 @@ def normalize_role(role: str | None) -> str:
     role_value = str(role or "").strip().lower()
     if role_value in {TEAM_LEAD_ROLE, MANAGER_ROLE}:
         return role_value
-    return TEAM_LEAD_ROLE
+    return MANAGER_ROLE
 
 
 def get_config_users() -> List[Dict]:
@@ -302,6 +302,55 @@ def add_manager_account(name: str, login: str, password: str, bitrix_id: int) ->
     _save_json_list(USERS_CONFIG_PATH, users)
     _save_json_list(MANAGERS_CONFIG_PATH, managers)
     return True, f"Менеджера «{name_clean}» успішно додано."
+
+
+def remove_manager_account(login_or_name: str, current_user_login: str) -> Tuple[bool, str]:
+    users, users_source = get_users_config_source()
+    managers, managers_source = get_managers_config_source()
+
+    if users_source != "file" or managers_source != "file":
+        return (
+            False,
+            "Видалення недоступне, якщо користувачі/менеджери задані через Streamlit secrets. "
+            "Перенесіть конфіг у config/users.json та config/managers.json.",
+        )
+
+    target = str(login_or_name or "").strip().lower()
+    if not target:
+        return False, "Оберіть менеджера для видалення."
+
+    target_user = next(
+        (
+            item
+            for item in users
+            if str(item.get("login", "")).strip().lower() == target
+            or str(item.get("name", "")).strip().lower() == target
+        ),
+        None,
+    )
+    if not target_user:
+        return False, "Не знайдено користувача для видалення."
+
+    target_login = str(target_user.get("login", "")).strip()
+    target_name = str(target_user.get("name", "")).strip()
+    target_manager_id = int(target_user.get("manager_id", 0))
+    target_role = normalize_role(str(target_user.get("role") or MANAGER_ROLE))
+
+    if target_role != MANAGER_ROLE:
+        return False, "Можна видаляти лише акаунти з роллю менеджера."
+
+    if target_login.lower() == str(current_user_login).strip().lower():
+        return False, "Неможливо видалити власний акаунт."
+
+    users_updated = [item for item in users if str(item.get("login", "")).strip().lower() != target_login.lower()]
+    managers_updated = [item for item in managers if int(item.get("id", 0)) != target_manager_id]
+
+    if len(users_updated) == len(users):
+        return False, "Не вдалося видалити менеджера з users.json."
+
+    _save_json_list(USERS_CONFIG_PATH, users_updated)
+    _save_json_list(MANAGERS_CONFIG_PATH, managers_updated)
+    return True, f"Менеджера «{target_name or target_login}» успішно видалено."
 
 
 def init_db() -> None:
@@ -901,6 +950,38 @@ def distribution_screen() -> None:
                         login=new_manager_login,
                         password=new_manager_password,
                         bitrix_id=int(new_manager_bitrix_id),
+                    )
+                    if ok:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+        with st.expander("Видалити менеджера", expanded=False):
+            users = get_config_users()
+            removable_managers = [
+                user_item
+                for user_item in users
+                if normalize_role(str(user_item.get("role") or MANAGER_ROLE)) == MANAGER_ROLE
+            ]
+            if not removable_managers:
+                st.info("Немає менеджерів, яких можна видалити.")
+            else:
+                remove_options = {
+                    f"{str(item.get('name') or item.get('login'))} ({str(item.get('login'))})": str(item.get("login"))
+                    for item in removable_managers
+                }
+                selected_remove_label = st.selectbox(
+                    "Оберіть менеджера для видалення",
+                    options=list(remove_options.keys()),
+                    index=None,
+                    placeholder="Оберіть менеджера",
+                )
+                if st.button("Видалити менеджера", type="secondary", disabled=selected_remove_label is None):
+                    selected_login = remove_options.get(selected_remove_label or "", "")
+                    ok, message = remove_manager_account(
+                        login_or_name=selected_login,
+                        current_user_login=user_login,
                     )
                     if ok:
                         st.success(message)
