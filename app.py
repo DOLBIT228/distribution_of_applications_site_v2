@@ -984,20 +984,8 @@ def distribution_screen() -> None:
     direction_options = get_direction_config()
     manager_options = get_managers_config()
 
-    if "auto_distribution_state" not in st.session_state:
-        st.session_state["auto_distribution_state"] = "stopped"
-    if "auto_distribution_last_run" not in st.session_state:
-        st.session_state["auto_distribution_last_run"] = None
-    if "last_in_progress_counts" not in st.session_state:
-        st.session_state["last_in_progress_counts"] = {}
-    if "pending_control_action" not in st.session_state:
-        st.session_state["pending_control_action"] = None
-    if "manager_selection" not in st.session_state:
-        st.session_state["manager_selection"] = []
-    if "active_managers" not in st.session_state:
-        st.session_state["active_managers"] = []
-    if "reconfig_previous_managers" not in st.session_state:
-        st.session_state["reconfig_previous_managers"] = []
+    if "direction_runtime" not in st.session_state:
+        st.session_state["direction_runtime"] = {}
     if "show_onboarding" not in st.session_state:
         st.session_state["show_onboarding"] = False
 
@@ -1010,14 +998,28 @@ def distribution_screen() -> None:
         col1, col2 = st.columns(2)
         with col1:
             direction_name = st.selectbox("Напрямок", list(direction_options.keys()))
+
+        runtime_by_direction = st.session_state["direction_runtime"]
+        if direction_name not in runtime_by_direction:
+            runtime_by_direction[direction_name] = {
+                "auto_distribution_state": "stopped",
+                "auto_distribution_last_run": None,
+                "last_in_progress_counts": {},
+                "pending_control_action": None,
+                "active_managers": [],
+                "reconfig_previous_managers": [],
+            }
+        direction_runtime = runtime_by_direction[direction_name]
+
         with col2:
             st.multiselect(
                 "Менеджери для розподілу",
                 options=list(manager_options.keys()),
-                key="manager_selection",
+                key=f"manager_selection__{direction_name}",
+                default=list(direction_runtime.get("active_managers", [])),
                 help="ID менеджерів не показуються в інтерфейсі.",
             )
-    selected_managers = list(st.session_state.get("manager_selection", []))
+    selected_managers = list(st.session_state.get(f"manager_selection__{direction_name}", []))
 
     direction = direction_options[direction_name]
     category_id = int(direction["funnel_id"])
@@ -1058,13 +1060,13 @@ def distribution_screen() -> None:
                 disabled=(
                     not target_stage_id
                     or not selected_managers
-                    or st.session_state["auto_distribution_state"] == "running"
+                    or direction_runtime["auto_distribution_state"] == "running"
                 ),
             ):
-                st.session_state["active_managers"] = selected_managers.copy()
-                st.session_state["auto_distribution_state"] = "running"
-                st.session_state["pending_control_action"] = None
-                managers_text = ", ".join(st.session_state["active_managers"]) if st.session_state["active_managers"] else "не обрано"
+                direction_runtime["active_managers"] = selected_managers.copy()
+                direction_runtime["auto_distribution_state"] = "running"
+                direction_runtime["pending_control_action"] = None
+                managers_text = ", ".join(direction_runtime["active_managers"]) if direction_runtime["active_managers"] else "не обрано"
                 send_chatbot_message(
                     "\n".join(
                         [
@@ -1080,35 +1082,35 @@ def distribution_screen() -> None:
         with action_col2:
             if st.button(
                 "Пауза",
-                disabled=st.session_state["auto_distribution_state"] != "running",
+                disabled=direction_runtime["auto_distribution_state"] != "running",
             ):
-                st.session_state["pending_control_action"] = "pause"
+                direction_runtime["pending_control_action"] = "pause"
 
         with action_col3:
-            if st.button("Зупинити авто-розподіл", disabled=st.session_state["auto_distribution_state"] == "stopped"):
-                st.session_state["pending_control_action"] = "stop"
+            if st.button("Зупинити авто-розподіл", disabled=direction_runtime["auto_distribution_state"] == "stopped"):
+                direction_runtime["pending_control_action"] = "stop"
 
         with action_col4:
             if st.button(
                 "Пауза для зміни менеджерів",
-                disabled=st.session_state["auto_distribution_state"] != "running",
+                disabled=direction_runtime["auto_distribution_state"] != "running",
                 help="Коротка пауза: змініть список менеджерів і продовжіть без повної зупинки.",
             ):
-                st.session_state["reconfig_previous_managers"] = list(st.session_state.get("active_managers", []))
-                st.session_state["auto_distribution_state"] = "reconfiguring"
-                st.session_state["pending_control_action"] = None
+                direction_runtime["reconfig_previous_managers"] = list(direction_runtime.get("active_managers", []))
+                direction_runtime["auto_distribution_state"] = "reconfiguring"
+                direction_runtime["pending_control_action"] = None
                 st.rerun()
 
-    pending_action = st.session_state.get("pending_control_action")
+    pending_action = direction_runtime.get("pending_control_action")
     if pending_action in {"pause", "stop"}:
         action_label = "паузу" if pending_action == "pause" else "зупинку"
-        with st.form(f"{pending_action}_reason_form", clear_on_submit=True):
+        with st.form(f"{pending_action}_reason_form__{direction_name}", clear_on_submit=True):
             reason = st.text_input(f"Вкажіть причину, чому ставите на {action_label}")
             confirm = st.form_submit_button(f"Підтвердити {action_label}")
             cancel = st.form_submit_button("Скасувати")
 
             if cancel:
-                st.session_state["pending_control_action"] = None
+                direction_runtime["pending_control_action"] = None
                 st.rerun()
 
             if confirm:
@@ -1116,7 +1118,7 @@ def distribution_screen() -> None:
                     st.warning("Причина обов'язкова.")
                 else:
                     if pending_action == "pause":
-                        st.session_state["auto_distribution_state"] = "paused"
+                        direction_runtime["auto_distribution_state"] = "paused"
                         send_chatbot_message(
                             "\n".join(
                                 [
@@ -1128,8 +1130,8 @@ def distribution_screen() -> None:
                             )
                         )
                     else:
-                        st.session_state["auto_distribution_state"] = "stopped"
-                        st.session_state["auto_distribution_last_run"] = None
+                        direction_runtime["auto_distribution_state"] = "stopped"
+                        direction_runtime["auto_distribution_last_run"] = None
                         stop_report = build_stop_report_message(direction_name, selected_managers, deal_types)
                         send_chatbot_message(
                             "\n\n".join(
@@ -1146,16 +1148,16 @@ def distribution_screen() -> None:
                                 ]
                             )
                         )
-                    st.session_state["pending_control_action"] = None
+                    direction_runtime["pending_control_action"] = None
                     st.rerun()
 
-    auto_state = st.session_state["auto_distribution_state"]
-    active_managers = list(st.session_state.get("active_managers", []))
+    auto_state = direction_runtime["auto_distribution_state"]
+    active_managers = list(direction_runtime.get("active_managers", []))
     should_autorefresh = False
     if auto_state == "running":
         if not active_managers:
             st.warning("Авто-режим зупинено: оберіть хоча б одного менеджера для розподілу.")
-            st.session_state["auto_distribution_state"] = "stopped"
+            direction_runtime["auto_distribution_state"] = "stopped"
             st.rerun()
 
         st.success(
@@ -1176,7 +1178,7 @@ def distribution_screen() -> None:
                 source_map=source_map,
                 repeat_stage_id=repeat_stage_id,
             )
-        st.session_state["auto_distribution_last_run"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        direction_runtime["auto_distribution_last_run"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
         status = run_result["status"]
         if status == "success":
@@ -1187,10 +1189,10 @@ def distribution_screen() -> None:
             st.info(run_result["message"])
 
         if run_result.get("in_progress_counts"):
-            st.session_state["last_in_progress_counts"] = run_result["in_progress_counts"]
+            direction_runtime["last_in_progress_counts"] = run_result["in_progress_counts"]
 
         st.caption(
-            f"Останній авто-запуск: {st.session_state.get('auto_distribution_last_run', '-')}. "
+            f"Останній авто-запуск: {direction_runtime.get('auto_distribution_last_run', '-')}. "
             "Сторінка перезапуститься автоматично після оновлення таблиць."
         )
         if active_managers:
@@ -1201,8 +1203,8 @@ def distribution_screen() -> None:
             "Коротка пауза для зміни ділення. Оновіть список менеджерів і натисніть "
             "«Продовжити з новим діленням»."
         )
-        previous_managers = list(st.session_state.get("reconfig_previous_managers", []))
-        with st.form("manager_change_reason_form", clear_on_submit=True):
+        previous_managers = list(direction_runtime.get("reconfig_previous_managers", []))
+        with st.form(f"manager_change_reason_form__{direction_name}", clear_on_submit=True):
             reason = st.text_input("Вкажіть причину зміни менеджерів")
             apply_change = st.form_submit_button(
                 "Продовжити з новим діленням",
@@ -1212,17 +1214,17 @@ def distribution_screen() -> None:
             cancel_change = st.form_submit_button("Скасувати зміну менеджерів")
 
             if cancel_change:
-                st.session_state["reconfig_previous_managers"] = []
-                st.session_state["auto_distribution_state"] = "running"
+                direction_runtime["reconfig_previous_managers"] = []
+                direction_runtime["auto_distribution_state"] = "running"
                 st.rerun()
 
             if apply_change:
                 if not reason.strip():
                     st.warning("Причина зміни менеджерів обов'язкова.")
                 else:
-                    st.session_state["active_managers"] = selected_managers.copy()
-                    st.session_state["auto_distribution_state"] = "running"
-                    st.session_state["reconfig_previous_managers"] = []
+                    direction_runtime["active_managers"] = selected_managers.copy()
+                    direction_runtime["auto_distribution_state"] = "running"
+                    direction_runtime["reconfig_previous_managers"] = []
 
                     previous_text = ", ".join(previous_managers) if previous_managers else "не обрано"
                     new_text = ", ".join(selected_managers) if selected_managers else "не обрано"
@@ -1254,7 +1256,7 @@ def distribution_screen() -> None:
 
     with st.container(key="onboarding_workload_block"):
         st.subheader("Кількість в роботі у менеджера")
-        counts = st.session_state.get("last_in_progress_counts", {})
+        counts = direction_runtime.get("last_in_progress_counts", {})
         if counts and managers_for_table:
             st.dataframe(
                 [
