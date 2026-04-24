@@ -16,13 +16,18 @@
           <span class="role-pill">{{ "Team Lead" if user_role == "team_lead" else "Manager" }}</span>
         </p>
       </div>
-      <form method="post" action="{{ url_for('logout') }}">
-        <button type="submit" class="secondary">Вийти</button>
-      </form>
+      <div class="header-actions">
+        {% if user_role == "team_lead" %}
+        <button id="toggle_manager_panel" type="button" class="secondary">Керування менеджерами</button>
+        {% endif %}
+        <form method="post" action="{{ url_for('logout') }}">
+          <button type="submit" class="secondary">Вийти</button>
+        </form>
+      </div>
     </header>
 
     {% if user_role == "team_lead" %}
-    <section class="card stack">
+    <section id="manager_panel" class="card stack hidden">
       <h2>Керування менеджерами</h2>
       <div class="two-col">
         <form id="add_manager_form" class="stack">
@@ -74,11 +79,20 @@
         </select>
       </label>
       <label>Розмір пачки
-        <input id="batch_size" type="number" min="1" value="{{ default_batch_size }}" />
+        <input
+          id="batch_size"
+          type="number"
+          min="1"
+          value="{{ default_batch_size }}"
+          {% if user_role != "team_lead" %}readonly disabled{% endif %}
+        />
       </label>
       <fieldset>
         <legend>Менеджери</legend>
-        <div class="grid2" id="managers">
+        <label>Пошук менеджера
+          <input id="manager_search" type="text" placeholder="Почніть вводити ім'я менеджера..." />
+        </label>
+        <div class="grid2 managers-list" id="managers">
           {% for manager_name, manager_id in managers.items() %}
           <label><input type="checkbox" value="{{ manager_name }}" checked /> {{ manager_name }} <small>(ID: {{ manager_id }})</small></label>
           {% endfor %}
@@ -109,13 +123,13 @@
           </tr>
         </thead>
         <tbody>
-          {% for manager_name, _ in managers.items() %}
-            <tr data-manager="{{ manager_name }}">
-              <td>{{ manager_name }}</td>
-              {% for deal_type in deal_types %}
-              <td data-deal-type="{{ deal_type }}">{{ summary.get(manager_name, {}).get(deal_type, 0) }}</td>
-              {% endfor %}
-            </tr>
+          {% for manager_name, manager_summary in summary.items() %}
+          <tr data-manager="{{ manager_name }}">
+            <td>{{ manager_name }}</td>
+            {% for deal_type in deal_types %}
+            <td data-deal-type="{{ deal_type }}">{{ manager_summary.get(deal_type, 0) }}</td>
+            {% endfor %}
+          </tr>
           {% endfor %}
         </tbody>
       </table>
@@ -131,6 +145,14 @@
     const stopBtn = document.getElementById('stop_auto');
     const reconfigureBtn = document.getElementById('reconfigure_auto');
     const clearBtn = document.getElementById('clear_daily');
+    const managerPanel = document.getElementById('manager_panel');
+    const toggleManagerPanelBtn = document.getElementById('toggle_manager_panel');
+    const managersContainer = document.getElementById('managers');
+    const managerSearchEl = document.getElementById('manager_search');
+    const isTeamLead = {{ 'true' if user_role == 'team_lead' else 'false' }};
+    const dealTypes = Array.from(document.querySelectorAll('#summary_table thead th')).slice(1)
+      .map((th) => th.textContent.trim());
+    let currentSummary = {{ summary | tojson }};
 
     let autoTimer = null;
     let autoRunning = false;
@@ -155,6 +177,13 @@
       document.getElementById('batch_size').value = defaultBatch;
     }
 
+    function getBatchSizeValue() {
+      const directionOption = document.getElementById('direction').selectedOptions[0];
+      const defaultBatch = Number(directionOption?.dataset?.batch || {{ default_batch_size }});
+      if (!isTeamLead) return defaultBatch;
+      return Number(document.getElementById('batch_size').value || defaultBatch);
+    }
+
     function setStatus(message) {
       statusEl.textContent = message || 'Готово';
     }
@@ -170,30 +199,40 @@
       countsEl.textContent = `Активні угоди «в роботі»: ${text}`;
     }
 
-    function ensureRow(manager) {
+    function refreshSummaryTable() {
       const tbody = document.querySelector('#summary_table tbody');
-      let row = tbody.querySelector(`tr[data-manager="${CSS.escape(manager)}"]`);
-      if (row) return row;
+      if (!tbody) return;
+      const selected = selectedManagers();
+      const managersWithDeals = Object.entries(currentSummary || {})
+        .filter(([, dealMap]) => Object.values(dealMap || {}).some((count) => Number(count) > 0))
+        .map(([manager]) => manager);
+      const visibleManagers = Array.from(new Set([...selected, ...managersWithDeals]));
 
-      row = document.createElement('tr');
-      row.dataset.manager = manager;
-      row.innerHTML = `<td>${manager}</td>` +
-        Array.from(document.querySelectorAll('#summary_table thead th')).slice(1)
-          .map((th) => `<td data-deal-type="${th.textContent.trim()}">0</td>`)
-          .join('');
-      tbody.appendChild(row);
-      return row;
+      tbody.innerHTML = visibleManagers
+        .map((manager) => {
+          const dealMap = currentSummary?.[manager] || {};
+          const cells = dealTypes
+            .map((dealType) => `<td data-deal-type="${dealType}">${Number(dealMap[dealType] || 0)}</td>`)
+            .join('');
+          return `<tr data-manager="${manager}"><td>${manager}</td>${cells}</tr>`;
+        })
+        .join('');
     }
 
     function updateSummary(summary) {
       if (!summary) return;
-      for (const [manager, dealMap] of Object.entries(summary)) {
-        const row = ensureRow(manager);
-        for (const [dealType, count] of Object.entries(dealMap)) {
-          const cell = row.querySelector(`td[data-deal-type="${CSS.escape(dealType)}"]`);
-          if (cell) cell.textContent = count;
-        }
-      }
+      currentSummary = summary;
+      refreshSummaryTable();
+    }
+
+    function filterManagersList() {
+      if (!managerSearchEl || !managersContainer) return;
+      const query = managerSearchEl.value.trim().toLowerCase();
+      const labels = Array.from(managersContainer.querySelectorAll('label'));
+      labels.forEach((label) => {
+        const text = label.textContent.toLowerCase();
+        label.style.display = text.includes(query) ? '' : 'none';
+      });
     }
 
     async function postJson(url, payload) {
@@ -210,7 +249,7 @@
     async function runOnce() {
       const payload = {
         direction: selectedDirection(),
-        batch_size: Number(document.getElementById('batch_size').value || 3),
+        batch_size: getBatchSizeValue(),
         managers: selectedManagers(),
       };
       setStatus('Виконується...');
@@ -325,6 +364,15 @@
     }
 
     document.getElementById('direction').addEventListener('change', syncBatchSizeFromDirection);
+    if (toggleManagerPanelBtn && managerPanel) {
+      toggleManagerPanelBtn.addEventListener('click', () => {
+        managerPanel.classList.toggle('hidden');
+      });
+    }
+    if (managerSearchEl) managerSearchEl.addEventListener('input', filterManagersList);
+    if (managersContainer) {
+      managersContainer.addEventListener('change', refreshSummaryTable);
+    }
     runBtn.addEventListener('click', runOnce);
     startBtn.addEventListener('click', startAuto);
     pauseBtn.addEventListener('click', pauseAuto);
@@ -336,6 +384,7 @@
     const removeManagerForm = document.getElementById('remove_manager_form');
     if (addManagerForm) addManagerForm.addEventListener('submit', handleAddManager);
     if (removeManagerForm) removeManagerForm.addEventListener('submit', handleRemoveManager);
+    refreshSummaryTable();
   </script>
 </body>
 </html>
