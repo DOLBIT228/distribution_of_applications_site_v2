@@ -115,12 +115,11 @@
     <div id="reconfigure_modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="reconfigure_modal_title">
       <div class="modal card stack">
         <h3 id="reconfigure_modal_title">Пауза для зміни менеджерів</h3>
-        <p class="muted">Вкажіть менеджера, якого потрібно виключити з авто-розподілу, та причину.</p>
-        <label>Менеджер для виключення
-          <select id="excluded_manager">
-            <option value="">Оберіть менеджера</option>
-          </select>
-        </label>
+        <p class="muted">Оберіть одного або кількох менеджерів, яких потрібно виключити з авто-розподілу, та причину.</p>
+        <fieldset>
+          <legend>Менеджери для виключення</legend>
+          <div id="excluded_managers" class="stack"></div>
+        </fieldset>
         <label>Причина
           <textarea id="reconfigure_reason" rows="3" placeholder="Опишіть причину..." required></textarea>
         </label>
@@ -163,7 +162,7 @@
     const reconfigureBtn = document.getElementById('reconfigure_auto');
     const clearBtn = document.getElementById('clear_daily');
     const reconfigureModal = document.getElementById('reconfigure_modal');
-    const excludedManagerEl = document.getElementById('excluded_manager');
+    const excludedManagersEl = document.getElementById('excluded_managers');
     const reconfigureReasonEl = document.getElementById('reconfigure_reason');
     const confirmReconfigureBtn = document.getElementById('confirm_reconfigure');
     const cancelReconfigureBtn = document.getElementById('cancel_reconfigure');
@@ -409,9 +408,10 @@
     }
 
     function openReconfigureModal() {
-      if (!reconfigureModal || !excludedManagerEl || !reconfigureReasonEl) return;
+      if (!reconfigureModal || !excludedManagersEl || !reconfigureReasonEl) return;
       const managers = selectedManagers();
-      excludedManagerEl.innerHTML = ['<option value="">Оберіть менеджера</option>', ...managers.map((manager) => `<option value="${manager}">${manager}</option>`)]
+      excludedManagersEl.innerHTML = managers
+        .map((manager) => `<label><input type="checkbox" value="${manager}" /> ${manager}</label>`)
         .join('');
       reconfigureReasonEl.value = '';
       reconfigureModal.classList.remove('hidden');
@@ -427,10 +427,12 @@
     }
 
     async function confirmReconfigure() {
-      const excludedManager = excludedManagerEl?.value || '';
+      const excludedManagers = Array.from(
+        excludedManagersEl?.querySelectorAll('input[type="checkbox"]:checked') || []
+      ).map((input) => input.value);
       const reason = (reconfigureReasonEl?.value || '').trim();
-      if (!excludedManager) {
-        setStatus('Оберіть менеджера для виключення з авто-розподілу.');
+      if (!excludedManagers.length) {
+        setStatus('Оберіть хоча б одного менеджера для виключення з авто-розподілу.');
         return;
       }
       if (!reason) {
@@ -438,12 +440,18 @@
         return;
       }
 
-      const managerCheckbox = document.querySelector(`#managers input[type="checkbox"][value="${CSS.escape(excludedManager)}"]`);
-      if (managerCheckbox) managerCheckbox.checked = false;
+      const managerCheckboxes = excludedManagers
+        .map((managerName) => document.querySelector(`#managers input[type="checkbox"][value="${CSS.escape(managerName)}"]`))
+        .filter(Boolean);
+      managerCheckboxes.forEach((checkbox) => {
+        checkbox.checked = false;
+      });
       const updatedManagers = selectedManagers();
       if (!updatedManagers.length) {
         setStatus('Потрібно залишити хоча б одного менеджера в авто-розподілі.');
-        if (managerCheckbox) managerCheckbox.checked = true;
+        managerCheckboxes.forEach((checkbox) => {
+          checkbox.checked = true;
+        });
         return;
       }
 
