@@ -11,30 +11,76 @@
     <header class="header-row card">
       <div>
         <h1>📥 Розподіл заявок</h1>
-        <p>Користувач: <strong>{{ user_name }}</strong></p>
+        <p>
+          Користувач: <strong>{{ user_name }}</strong>
+          <span class="role-pill">{{ "Team Lead" if user_role == "team_lead" else "Manager" }}</span>
+        </p>
       </div>
       <form method="post" action="{{ url_for('logout') }}">
         <button type="submit" class="secondary">Вийти</button>
       </form>
     </header>
 
+    {% if user_role == "team_lead" %}
+    <section class="card stack">
+      <h2>Керування менеджерами</h2>
+      <div class="two-col">
+        <form id="add_manager_form" class="stack">
+          <h3>Додати менеджера</h3>
+          <label>Ім'я
+            <input name="name" type="text" required />
+          </label>
+          <label>Логін
+            <input name="login" type="text" required />
+          </label>
+          <label>Пароль
+            <input name="password" type="password" required />
+          </label>
+          <label>ID з Bitrix24
+            <input name="bitrix_id" type="number" min="1" required />
+          </label>
+          <button type="submit">Додати менеджера</button>
+        </form>
+
+        <form id="remove_manager_form" class="stack">
+          <h3>Видалити менеджера</h3>
+          <label>Кого видалити
+            <select name="login_or_name" required>
+              <option value="">Оберіть менеджера</option>
+              {% for user in removable_users %}
+                <option value="{{ user['login'] }}">{{ user.get('name', user['login']) }} ({{ user['login'] }})</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button type="submit" class="danger">Видалити менеджера</button>
+        </form>
+      </div>
+      <p id="manager_status" class="status-note">Готово.</p>
+    </section>
+    {% endif %}
+
     <section class="card stack">
       <h2>Панель керування</h2>
       <label>Напрямок
         <select id="direction">
           {% for name, cfg in directions.items() %}
-            <option value="{{ name }}" {% if selected_direction == name %}selected{% endif %}>{{ name }}</option>
+            <option
+              value="{{ name }}"
+              data-batch="{{ cfg.get('batch_size', default_batch_size) }}"
+              data-interval="{{ cfg.get('auto_interval_seconds', auto_interval_seconds) }}"
+              {% if selected_direction == name %}selected{% endif %}
+            >{{ name }}</option>
           {% endfor %}
         </select>
       </label>
-      <label>Batch size
-        <input id="batch_size" type="number" min="1" value="{{ directions[selected_direction]['batch_size'] }}" />
+      <label>Розмір пачки
+        <input id="batch_size" type="number" min="1" value="{{ default_batch_size }}" />
       </label>
       <fieldset>
         <legend>Менеджери</legend>
         <div class="grid2" id="managers">
           {% for manager_name, manager_id in managers.items() %}
-          <label><input type="checkbox" value="{{ manager_name }}" checked /> {{ manager_name }} (ID: {{ manager_id }})</label>
+          <label><input type="checkbox" value="{{ manager_name }}" checked /> {{ manager_name }} <small>(ID: {{ manager_id }})</small></label>
           {% endfor %}
         </div>
       </fieldset>
@@ -43,12 +89,18 @@
         <button id="run_once">Розподілити зараз</button>
         <button id="start_auto" class="secondary">Почати авто-розподіл</button>
         <button id="pause_auto" class="secondary">Пауза</button>
+        <button id="reconfigure_auto" class="secondary">Пауза для зміни менеджерів</button>
+        <button id="stop_auto" class="danger">Зупинити авто-розподіл</button>
+        {% if user_role == "team_lead" %}
+        <button id="clear_daily" class="danger-outline">Очистити значення за сьогодні</button>
+        {% endif %}
       </div>
       <p id="status">Готово до роботи.</p>
+      <p id="counts" class="muted"></p>
     </section>
 
     <section class="card">
-      <h2>Поточний підсумок за день</h2>
+      <h2>Таблиця розподілу за сьогодні</h2>
       <table id="summary_table">
         <thead>
           <tr>
@@ -58,10 +110,10 @@
         </thead>
         <tbody>
           {% for manager_name, _ in managers.items() %}
-            <tr>
+            <tr data-manager="{{ manager_name }}">
               <td>{{ manager_name }}</td>
               {% for deal_type in deal_types %}
-              <td>{{ summary.get(manager_name, {}).get(deal_type, 0) }}</td>
+              <td data-deal-type="{{ deal_type }}">{{ summary.get(manager_name, {}).get(deal_type, 0) }}</td>
               {% endfor %}
             </tr>
           {% endfor %}
@@ -69,59 +121,221 @@
       </table>
     </section>
   </main>
+
   <script>
     const statusEl = document.getElementById('status');
+    const countsEl = document.getElementById('counts');
     const runBtn = document.getElementById('run_once');
     const startBtn = document.getElementById('start_auto');
     const pauseBtn = document.getElementById('pause_auto');
-    let timer = null;
+    const stopBtn = document.getElementById('stop_auto');
+    const reconfigureBtn = document.getElementById('reconfigure_auto');
+    const clearBtn = document.getElementById('clear_daily');
+
+    let autoTimer = null;
+    let autoRunning = false;
+    let autoManagersSnapshot = [];
 
     function selectedManagers() {
       return Array.from(document.querySelectorAll('#managers input:checked')).map((el) => el.value);
     }
 
+    function selectedDirection() {
+      return document.getElementById('direction').value;
+    }
+
+    function readIntervalSeconds() {
+      const option = document.getElementById('direction').selectedOptions[0];
+      return Number(option?.dataset?.interval || 30);
+    }
+
+    function syncBatchSizeFromDirection() {
+      const option = document.getElementById('direction').selectedOptions[0];
+      const defaultBatch = Number(option?.dataset?.batch || {{ default_batch_size }});
+      document.getElementById('batch_size').value = defaultBatch;
+    }
+
+    function setStatus(message) {
+      statusEl.textContent = message || 'Готово';
+    }
+
+    function setCounts(inProgressCounts) {
+      if (!inProgressCounts || Object.keys(inProgressCounts).length === 0) {
+        countsEl.textContent = '';
+        return;
+      }
+      const text = Object.entries(inProgressCounts)
+        .map(([manager, count]) => `${manager}: ${count}`)
+        .join(' | ');
+      countsEl.textContent = `Активні угоди «в роботі»: ${text}`;
+    }
+
+    function ensureRow(manager) {
+      const tbody = document.querySelector('#summary_table tbody');
+      let row = tbody.querySelector(`tr[data-manager="${CSS.escape(manager)}"]`);
+      if (row) return row;
+
+      row = document.createElement('tr');
+      row.dataset.manager = manager;
+      row.innerHTML = `<td>${manager}</td>` +
+        Array.from(document.querySelectorAll('#summary_table thead th')).slice(1)
+          .map((th) => `<td data-deal-type="${th.textContent.trim()}">0</td>`)
+          .join('');
+      tbody.appendChild(row);
+      return row;
+    }
+
     function updateSummary(summary) {
       if (!summary) return;
-      const table = document.getElementById('summary_table').querySelector('tbody');
-      for (const row of table.rows) {
-        const manager = row.cells[0].textContent.trim();
-        for (let i = 1; i < row.cells.length; i++) {
-          const dealType = document.querySelector(`#summary_table thead tr th:nth-child(${i+1})`).textContent.trim();
-          row.cells[i].textContent = summary?.[manager]?.[dealType] ?? 0;
+      for (const [manager, dealMap] of Object.entries(summary)) {
+        const row = ensureRow(manager);
+        for (const [dealType, count] of Object.entries(dealMap)) {
+          const cell = row.querySelector(`td[data-deal-type="${CSS.escape(dealType)}"]`);
+          if (cell) cell.textContent = count;
         }
       }
     }
 
-    async function runOnce() {
-      const payload = {
-        direction: document.getElementById('direction').value,
-        batch_size: Number(document.getElementById('batch_size').value || 3),
-        managers: selectedManagers(),
-      };
-      statusEl.textContent = 'Виконується...';
-      const res = await fetch('/api/distribute-once', {
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
-      statusEl.textContent = data.message || 'Готово';
-      updateSummary(data.summary);
+      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+      return data;
     }
 
-    runBtn.addEventListener('click', runOnce);
-    startBtn.addEventListener('click', () => {
-      if (timer) return;
-      timer = setInterval(runOnce, 30000);
-      statusEl.textContent = 'Авто-розподіл увімкнено (кожні 30 сек).';
-    });
-    pauseBtn.addEventListener('click', () => {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
+    async function runOnce() {
+      const payload = {
+        direction: selectedDirection(),
+        batch_size: Number(document.getElementById('batch_size').value || 3),
+        managers: selectedManagers(),
+      };
+      setStatus('Виконується...');
+      try {
+        const data = await postJson('/api/distribute-once', payload);
+        setStatus(data.message || 'Готово');
+        updateSummary(data.summary);
+        setCounts(data.in_progress_counts);
+      } catch (err) {
+        setStatus(`Помилка: ${err.message}`);
       }
-      statusEl.textContent = 'Пауза авто-розподілу.';
-    });
+    }
+
+    async function sendControl(action, reason = '', previousManagers = []) {
+      return postJson('/api/control', {
+        action,
+        reason,
+        direction: selectedDirection(),
+        managers: selectedManagers(),
+        previous_managers: previousManagers,
+      });
+    }
+
+    async function startAuto() {
+      if (autoRunning) return;
+      const managers = selectedManagers();
+      if (!managers.length) {
+        setStatus('Оберіть хоча б одного менеджера для авто-розподілу.');
+        return;
+      }
+
+      await sendControl('start');
+      autoManagersSnapshot = managers;
+      autoRunning = true;
+      const interval = Math.max(5, readIntervalSeconds()) * 1000;
+      await runOnce();
+      autoTimer = setInterval(runOnce, interval);
+      setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
+    }
+
+    async function pauseAuto() {
+      if (!autoRunning) {
+        setStatus('Авто-розподіл вже на паузі.');
+        return;
+      }
+      const reason = prompt('Вкажіть причину паузи:');
+      if (!reason) return;
+      await sendControl('pause', reason);
+      if (autoTimer) clearInterval(autoTimer);
+      autoTimer = null;
+      autoRunning = false;
+      setStatus('Авто-розподіл на паузі.');
+    }
+
+    async function stopAuto() {
+      const reason = prompt('Вкажіть причину зупинки:');
+      if (!reason) return;
+      await sendControl('stop', reason);
+      if (autoTimer) clearInterval(autoTimer);
+      autoTimer = null;
+      autoRunning = false;
+      setStatus('Авто-розподіл зупинено.');
+    }
+
+    async function reconfigureAuto() {
+      const reason = prompt('Вкажіть причину зміни менеджерів:');
+      if (!reason) return;
+      await sendControl('reconfigure', reason, autoManagersSnapshot);
+      autoManagersSnapshot = selectedManagers();
+      setStatus('Склад менеджерів оновлено.');
+    }
+
+    async function clearDaily() {
+      if (!clearBtn) return;
+      if (!confirm('Очистити всі записи за сьогодні для обраного напрямку?')) return;
+      try {
+        const data = await postJson('/api/clear-daily', { direction: selectedDirection() });
+        setStatus(data.message || 'Очищено');
+        updateSummary(data.summary);
+      } catch (err) {
+        setStatus(`Помилка: ${err.message}`);
+      }
+    }
+
+    async function handleAddManager(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const managerStatus = document.getElementById('manager_status');
+      const payload = Object.fromEntries(new FormData(form).entries());
+      payload.bitrix_id = Number(payload.bitrix_id || 0);
+      try {
+        const data = await postJson('/api/managers/add', payload);
+        managerStatus.textContent = data.message;
+        window.location.reload();
+      } catch (err) {
+        managerStatus.textContent = `Помилка: ${err.message}`;
+      }
+    }
+
+    async function handleRemoveManager(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const managerStatus = document.getElementById('manager_status');
+      const payload = Object.fromEntries(new FormData(form).entries());
+      try {
+        const data = await postJson('/api/managers/remove', payload);
+        managerStatus.textContent = data.message;
+        window.location.reload();
+      } catch (err) {
+        managerStatus.textContent = `Помилка: ${err.message}`;
+      }
+    }
+
+    document.getElementById('direction').addEventListener('change', syncBatchSizeFromDirection);
+    runBtn.addEventListener('click', runOnce);
+    startBtn.addEventListener('click', startAuto);
+    pauseBtn.addEventListener('click', pauseAuto);
+    stopBtn.addEventListener('click', stopAuto);
+    reconfigureBtn.addEventListener('click', reconfigureAuto);
+    if (clearBtn) clearBtn.addEventListener('click', clearDaily);
+
+    const addManagerForm = document.getElementById('add_manager_form');
+    const removeManagerForm = document.getElementById('remove_manager_form');
+    if (addManagerForm) addManagerForm.addEventListener('submit', handleAddManager);
+    if (removeManagerForm) removeManagerForm.addEventListener('submit', handleRemoveManager);
   </script>
 </body>
 </html>
