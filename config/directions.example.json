@@ -8,5 +8,15 @@
     "distribution_logic": "site",
     "batch_size": 3,
     "auto_interval_seconds": 30
+  },
+  {
+    "name": "Instagram",
+    "funnel_id": 4,
+    "status_id": "C4:NEW",
+    "next_status_id": "C4:PREPAYMENT_INVOICE",
+    "in_progress_status_id": "C4:PREPAYMENT_INVOICE",
+    "distribution_logic": "instagram",
+    "batch_size": 3,
+    "auto_interval_seconds": 30
   }
 ]

@@ -44,6 +44,14 @@
           <label>ID з Bitrix24
             <input name="bitrix_id" type="number" min="1" required />
           </label>
+          <label>Напрямок
+            <select name="direction" required>
+              <option value="">Оберіть напрямок</option>
+              {% for name in directions.keys() %}
+                <option value="{{ name }}">{{ name }}</option>
+              {% endfor %}
+            </select>
+          </label>
           <button type="submit">Додати менеджера</button>
         </form>
 
@@ -69,12 +77,14 @@
       <label>Напрямок
         <select id="direction">
           {% for name, cfg in directions.items() %}
+            {% if name in accessible_directions %}
             <option
               value="{{ name }}"
               data-batch="{{ cfg.get('batch_size', default_batch_size) }}"
               data-interval="{{ cfg.get('auto_interval_seconds', auto_interval_seconds) }}"
               {% if selected_direction == name %}selected{% endif %}
             >{{ name }}</option>
+            {% endif %}
           {% endfor %}
         </select>
       </label>
@@ -171,8 +181,8 @@
     const managersContainer = document.getElementById('managers');
     const managerSearchEl = document.getElementById('manager_search');
     const isTeamLead = {{ 'true' if user_role == 'team_lead' else 'false' }};
-    const dealTypes = Array.from(document.querySelectorAll('#summary_table thead th')).slice(1)
-      .map((th) => th.textContent.trim());
+    const managersByDirection = {{ managers_by_direction | tojson }};
+    const dealTypesByDirection = {{ deal_types_by_direction | tojson }};
     let currentSummary = {{ summary | tojson }};
     const STATE_KEY = 'distribution_ui_state_v1';
     const AUTO_KEY = 'distribution_auto_state_v1';
@@ -187,6 +197,27 @@
 
     function selectedDirection() {
       return document.getElementById('direction').value;
+    }
+
+    function renderManagersForDirection(directionName) {
+      const managerMap = managersByDirection?.[directionName] || {};
+      const previouslySelected = new Set(selectedManagers());
+      managersContainer.innerHTML = Object.entries(managerMap)
+        .map(([managerName, managerId]) => {
+          const isChecked = previouslySelected.size === 0 || previouslySelected.has(managerName);
+          return `<label><input type="checkbox" value="${managerName}" ${isChecked ? 'checked' : ''} /> ${managerName} <small>(ID: ${managerId})</small></label>`;
+        })
+        .join('');
+      filterManagersList();
+      refreshSummaryTable();
+    }
+
+    function renderSummaryHeader() {
+      const directionName = selectedDirection();
+      const directionDealTypes = dealTypesByDirection?.[directionName] || [];
+      const theadRow = document.querySelector('#summary_table thead tr');
+      if (!theadRow) return;
+      theadRow.innerHTML = `<th>Менеджер</th>${directionDealTypes.map((item) => `<th>${item}</th>`).join('')}`;
     }
 
     function saveUiState() {
@@ -288,6 +319,7 @@
     function refreshSummaryTable() {
       const tbody = document.querySelector('#summary_table tbody');
       if (!tbody) return;
+      const directionDealTypes = dealTypesByDirection?.[selectedDirection()] || [];
       const selected = selectedManagers();
       const managersWithDeals = Object.entries(currentSummary || {})
         .filter(([, dealMap]) => Object.values(dealMap || {}).some((count) => Number(count) > 0))
@@ -297,7 +329,7 @@
       tbody.innerHTML = visibleManagers
         .map((manager) => {
           const dealMap = currentSummary?.[manager] || {};
-          const cells = dealTypes
+          const cells = directionDealTypes
             .map((dealType) => `<td data-deal-type="${dealType}">${Number(dealMap[dealType] || 0)}</td>`)
             .join('');
           return `<tr data-manager="${manager}"><td>${manager}</td>${cells}</tr>`;
@@ -506,14 +538,18 @@
     }
 
     document.getElementById('direction').addEventListener('change', () => {
-      syncBatchSizeFromDirection();
-      saveUiState();
       if (autoRunning) {
         if (autoTimer) clearInterval(autoTimer);
-        const interval = Math.max(5, readIntervalSeconds()) * 1000;
-        autoTimer = setInterval(runOnce, interval);
-        setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
+        autoTimer = null;
+        autoRunning = false;
+        syncActionButtons();
+        saveAutoState();
+        setStatus('Напрямок змінено. Для нового напрямку авто-розподіл потрібно запустити окремо.');
       }
+      syncBatchSizeFromDirection();
+      renderManagersForDirection(selectedDirection());
+      renderSummaryHeader();
+      saveUiState();
     });
     if (toggleManagerPanelBtn && managerPanel) {
       toggleManagerPanelBtn.addEventListener('click', () => {
@@ -542,6 +578,8 @@
     if (addManagerForm) addManagerForm.addEventListener('submit', handleAddManager);
     if (removeManagerForm) removeManagerForm.addEventListener('submit', handleRemoveManager);
     loadUiState();
+    renderManagersForDirection(selectedDirection());
+    renderSummaryHeader();
     refreshSummaryTable();
     const autoState = loadAutoState();
     autoManagersSnapshot = autoState.managersSnapshot;
