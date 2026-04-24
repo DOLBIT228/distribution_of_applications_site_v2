@@ -24,8 +24,10 @@ USERS_CONFIG_PATH = CONFIG_DIR / "users.json"
 DIRECTIONS_CONFIG_PATH = CONFIG_DIR / "directions.json"
 MANAGERS_CONFIG_PATH = CONFIG_DIR / "managers.json"
 SITE_DEAL_TYPES = ["Сайт (Тест)"]
+INSTAGRAM_DEAL_TYPES = ["Консультація", "Термін", "Повторне", "База"]
 TEAM_LEAD_ROLE = "team_lead"
 MANAGER_ROLE = "manager"
+CONSULTATION_PREFIX = "КОНСУЛЬТАЦІЯ"
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_vps")
@@ -78,28 +80,52 @@ def get_managers_config() -> Dict[str, int]:
     return {str(item["name"]): int(item["id"]) for item in managers}
 
 
+def get_manager_direction_map() -> Dict[str, str]:
+    return {
+        str(user.get("name") or ""): str(user.get("direction") or "").strip()
+        for user in get_config_users()
+        if normalize_role(str(user.get("role") or MANAGER_ROLE)) == MANAGER_ROLE and str(user.get("name") or "").strip()
+    }
+
+
+def get_managers_for_direction(direction_name: str) -> Dict[str, int]:
+    manager_options = get_managers_config()
+    manager_directions = get_manager_direction_map()
+    return {
+        manager_name: manager_id
+        for manager_name, manager_id in manager_options.items()
+        if str(manager_directions.get(manager_name) or "").strip() == direction_name
+    }
+
+
 def get_auth_user(login: str, password: str) -> Optional[Dict]:
     for user in get_config_users():
         if str(user["login"]) == login and str(user["password"]) == password:
+            user_direction = str(user.get("direction") or "").strip()
             return {
                 "login": str(user["login"]),
                 "name": str(user.get("name") or user["login"]),
                 "manager_id": int(user["manager_id"]),
                 "role": normalize_role(str(user.get("role") or MANAGER_ROLE)),
+                "direction": user_direction,
             }
     return None
 
 
-def add_manager_account(name: str, login: str, password: str, bitrix_id: int) -> Tuple[bool, str]:
+def add_manager_account(name: str, login: str, password: str, bitrix_id: int, direction: str) -> Tuple[bool, str]:
     users = get_config_users()
     managers = _load_json_list(MANAGERS_CONFIG_PATH, "конфігурацію менеджерів")
+    directions = get_direction_config()
 
     name_clean = str(name).strip()
     login_clean = str(login).strip()
     password_clean = str(password).strip()
+    direction_clean = str(direction).strip()
 
     if not name_clean or not login_clean or not password_clean:
         return False, "Заповніть усі поля: ім'я, логін, пароль та ID Bitrix24."
+    if direction_clean not in directions:
+        return False, "Оберіть валідний напрямок для менеджера."
 
     if any(str(item.get("login", "")).strip().lower() == login_clean.lower() for item in users):
         return False, "Користувач з таким логіном вже існує."
@@ -117,9 +143,10 @@ def add_manager_account(name: str, login: str, password: str, bitrix_id: int) ->
             "name": name_clean,
             "manager_id": int(bitrix_id),
             "role": MANAGER_ROLE,
+            "direction": direction_clean,
         }
     )
-    managers.append({"name": name_clean, "id": int(bitrix_id)})
+    managers.append({"name": name_clean, "id": int(bitrix_id), "direction": direction_clean})
 
     _save_json_list(USERS_CONFIG_PATH, users)
     _save_json_list(MANAGERS_CONFIG_PATH, managers)
@@ -221,8 +248,23 @@ def fetch_source_map() -> Dict[str, str]:
     return {str(item.get("STATUS_ID", "")): str(item.get("NAME", "")) for item in data.get("result", [])}
 
 
-def classify_deal_type(deal: Dict, source_map: Dict[str, str]) -> str:
-    return "Сайт (Тест)"
+def get_direction_logic(direction_name: str, direction: Dict) -> str:
+    logic = str(direction.get("distribution_logic") or "").strip().lower()
+    if logic in {"site", "instagram"}:
+        return logic
+    direction_upper = direction_name.strip().upper()
+    return "instagram" if "INSTAGRAM" in direction_upper else "site"
+
+
+def get_deal_types_for_logic(logic: str) -> List[str]:
+    return SITE_DEAL_TYPES if logic == "site" else INSTAGRAM_DEAL_TYPES
+
+
+def classify_deal_type(deal: Dict, source_map: Dict[str, str], logic: str) -> str:
+    if logic == "site":
+        return SITE_DEAL_TYPES[0]
+    title = str(deal.get("TITLE") or "").strip().upper()
+    return "Консультація" if title.startswith(CONSULTATION_PREFIX) else "Термін"
 
 
 def update_deal_assignment_and_stage(deal_id: int, manager_id: int, next_stage_id: str) -> None:
@@ -410,12 +452,12 @@ def clear_daily_distribution(direction_name: str) -> int:
 
 def run_distribution_once(direction_name: str, selected_managers: List[str], batch_size: int) -> Dict:
     directions = get_direction_config()
-    manager_options = get_managers_config()
 
     if direction_name not in directions:
         return {"status": "warning", "message": "Вибраний напрямок не знайдено", "results": []}
 
     direction = directions[direction_name]
+    logic = get_direction_logic(direction_name, direction)
     category_id = int(direction["funnel_id"])
     source_stage_id = str(direction["status_id"])
     next_stage_id = str(direction.get("next_status_id") or "").strip()
@@ -434,7 +476,8 @@ def run_distribution_once(direction_name: str, selected_managers: List[str], bat
 
     deals_all = fetch_deals(category_id, source_stage_id)
     source_map = fetch_source_map()
-    deal_types = SITE_DEAL_TYPES
+    deal_types = get_deal_types_for_logic(logic)
+    manager_options = get_managers_for_direction(direction_name)
 
     manager_ids = {name: manager_options[name] for name in selected_managers if name in manager_options}
     if len(manager_ids) != len(selected_managers):
@@ -468,7 +511,7 @@ def run_distribution_once(direction_name: str, selected_managers: List[str], bat
 
     results = []
     for deal in target_deals:
-        deal_type = classify_deal_type(deal, source_map)
+        deal_type = classify_deal_type(deal, source_map, logic)
         manager_name = select_manager_for_deal(deal_type, available_managers, manager_state, remaining_slots)
         manager_id = manager_ids[manager_name]
 
@@ -509,6 +552,16 @@ def login_required(fn):
     return wrapper
 
 
+def get_accessible_directions_for_user() -> List[str]:
+    directions = get_direction_config()
+    if session.get("user_role") == TEAM_LEAD_ROLE:
+        return list(directions.keys())
+    assigned_direction = str(session.get("user_direction") or "").strip()
+    if assigned_direction in directions:
+        return [assigned_direction]
+    return []
+
+
 def team_lead_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -532,6 +585,7 @@ def login():
         session["user_name"] = user["name"]
         session["user_role"] = user["role"]
         session["user_manager_id"] = user["manager_id"]
+        session["user_direction"] = user.get("direction", "")
         return redirect(url_for("index"))
     return render_template("login.html")
 
@@ -546,8 +600,17 @@ def logout():
 @login_required
 def index():
     directions = get_direction_config()
-    managers = get_managers_config()
-    selected_direction = request.args.get("direction") or next(iter(directions.keys()))
+    accessible_directions = get_accessible_directions_for_user()
+    if not accessible_directions:
+        return "Для користувача не налаштовано доступний напрямок. Зверніться до Team Lead.", 403
+    requested_direction = str(request.args.get("direction") or "").strip()
+    selected_direction = requested_direction if requested_direction in accessible_directions else accessible_directions[0]
+    managers = get_managers_for_direction(selected_direction)
+    managers_by_direction = {direction_name: get_managers_for_direction(direction_name) for direction_name in directions.keys()}
+    deal_types_by_direction = {
+        direction_name: get_deal_types_for_logic(get_direction_logic(direction_name, direction_cfg))
+        for direction_name, direction_cfg in directions.items()
+    }
     summary = get_daily_summary(selected_direction)
     removable_users = [
         user_item
@@ -557,10 +620,13 @@ def index():
     return render_template(
         "index.html",
         directions=directions,
+        accessible_directions=accessible_directions,
         managers=managers,
+        managers_by_direction=managers_by_direction,
         selected_direction=selected_direction,
         summary=summary,
-        deal_types=SITE_DEAL_TYPES,
+        deal_types=deal_types_by_direction[selected_direction],
+        deal_types_by_direction=deal_types_by_direction,
         user_name=session.get("user_name", "Користувач"),
         user_role=session.get("user_role", MANAGER_ROLE),
         removable_users=removable_users,
@@ -575,6 +641,8 @@ def summary_api():
     direction_name = str(request.args.get("direction", "")).strip()
     if not direction_name:
         return jsonify({"status": "warning", "message": "Не задано напрямок"}), 400
+    if direction_name not in get_accessible_directions_for_user():
+        return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
     return jsonify({"status": "success", "summary": get_daily_summary(direction_name)})
 
 
@@ -587,6 +655,9 @@ def distribute_once_api():
     directions = get_direction_config()
     if direction_name not in directions:
         return jsonify({"status": "warning", "message": "Вибраний напрямок не знайдено"}), 400
+    accessible_directions = get_accessible_directions_for_user()
+    if direction_name not in accessible_directions:
+        return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
 
     direction_batch = int(directions[direction_name].get("batch_size") or DEFAULT_BATCH_SIZE)
     is_team_lead = session.get("user_role") == TEAM_LEAD_ROLE
@@ -612,6 +683,9 @@ def control_api():
     direction_name = str(payload.get("direction", "")).strip()
     selected_managers = [str(m) for m in payload.get("managers", [])]
     reason = str(payload.get("reason", "")).strip()
+    accessible_directions = get_accessible_directions_for_user()
+    if direction_name and direction_name not in accessible_directions:
+        return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
 
     if action in {"pause", "stop", "reconfigure"} and not reason:
         return jsonify({"status": "warning", "message": "Причина обов'язкова"}), 400
@@ -644,7 +718,10 @@ def control_api():
         return jsonify({"status": "success", "message": "Авто-розподіл на паузі"})
 
     if action == "stop":
-        stop_report = build_stop_report_message(direction_name, selected_managers, SITE_DEAL_TYPES)
+        directions = get_direction_config()
+        direction_cfg = directions.get(direction_name, {})
+        deal_types = get_deal_types_for_logic(get_direction_logic(direction_name, direction_cfg))
+        stop_report = build_stop_report_message(direction_name, selected_managers, deal_types)
         send_chatbot_message(
             "\n\n".join(
                 [
@@ -692,7 +769,14 @@ def add_manager_api():
     login_value = str(payload.get("login", "")).strip()
     password = str(payload.get("password", "")).strip()
     bitrix_id = int(payload.get("bitrix_id", 0))
-    ok, message = add_manager_account(name=name, login=login_value, password=password, bitrix_id=bitrix_id)
+    direction = str(payload.get("direction", "")).strip()
+    ok, message = add_manager_account(
+        name=name,
+        login=login_value,
+        password=password,
+        bitrix_id=bitrix_id,
+        direction=direction,
+    )
     status = "success" if ok else "error"
     code = 200 if ok else 400
     return jsonify({"status": status, "message": message}), code

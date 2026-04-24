@@ -11,6 +11,7 @@
     "password": "change_me_manager",
     "name": "Менеджер 1",
     "manager_id": 2,
-    "role": "manager"
+    "role": "manager",
+    "direction": "Сайт (Тест)"
   }
 ]

@@ -1,10 +1,12 @@
 [
   {
     "name": "Менеджер 1",
-    "id": 1
+    "id": 1,
+    "direction": "Сайт (Тест)"
   },
   {
     "name": "Менеджер 2",
-    "id": 2
+    "id": 2,
+    "direction": "Instagram"
   }
 ]
