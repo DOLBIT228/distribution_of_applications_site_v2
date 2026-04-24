@@ -346,7 +346,8 @@ def select_manager_for_deal(
 
 def build_stop_report_message(direction_name: str, selected_managers: List[str], deal_types: List[str]) -> str:
     summary = get_daily_summary(direction_name)
-    managers_to_show = selected_managers or sorted(summary.keys())
+    summary_managers = sorted(summary.keys())
+    managers_to_show = list(dict.fromkeys(selected_managers + summary_managers))
 
     lines = [f"📊 Звіт по розподілу ({direction_name}) за {date.today().isoformat()}:"]
     if not summary:
