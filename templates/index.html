@@ -185,11 +185,10 @@
     const dealTypesByDirection = {{ deal_types_by_direction | tojson }};
     let currentSummary = {{ summary | tojson }};
     const STATE_KEY = 'distribution_ui_state_v1';
-    const AUTO_KEY = 'distribution_auto_state_v1';
+    const AUTO_KEY = 'distribution_auto_state_v2';
 
-    let autoTimer = null;
-    let autoRunning = false;
-    let autoManagersSnapshot = [];
+    const autoTimersByDirection = {};
+    const autoStateByDirection = {};
 
     function selectedManagers() {
       return Array.from(document.querySelectorAll('#managers input:checked')).map((el) => el.value);
@@ -254,30 +253,41 @@
       }
     }
 
+    function getDirectionState(directionName) {
+      if (!autoStateByDirection[directionName]) {
+        autoStateByDirection[directionName] = {
+          running: false,
+          managersSnapshot: [],
+        };
+      }
+      return autoStateByDirection[directionName];
+    }
+
     function saveAutoState() {
-      const payload = {
-        running: autoRunning,
-        managersSnapshot: autoManagersSnapshot,
-      };
-      localStorage.setItem(AUTO_KEY, JSON.stringify(payload));
+      localStorage.setItem(AUTO_KEY, JSON.stringify(autoStateByDirection));
     }
 
     function loadAutoState() {
       try {
         const raw = localStorage.getItem(AUTO_KEY);
-        if (!raw) return { running: false, managersSnapshot: [] };
+        if (!raw) return {};
         const saved = JSON.parse(raw);
-        return {
-          running: Boolean(saved?.running),
-          managersSnapshot: Array.isArray(saved?.managersSnapshot) ? saved.managersSnapshot : [],
-        };
+        if (!saved || typeof saved !== 'object') return {};
+        return saved;
       } catch (_) {
-        return { running: false, managersSnapshot: [] };
+        return {};
       }
     }
 
     function readIntervalSeconds() {
       const option = document.getElementById('direction').selectedOptions[0];
+      return Number(option?.dataset?.interval || 30);
+    }
+
+    function readIntervalSecondsForDirection(directionName) {
+      const directionEl = document.getElementById('direction');
+      if (!directionEl) return 30;
+      const option = Array.from(directionEl.options).find((item) => item.value === directionName);
       return Number(option?.dataset?.interval || 30);
     }
 
@@ -294,15 +304,25 @@
       return Number(document.getElementById('batch_size').value || defaultBatch);
     }
 
+    function getBatchSizeValueForDirection(directionName) {
+      const directionEl = document.getElementById('direction');
+      const directionOption = Array.from(directionEl.options).find((option) => option.value === directionName);
+      const defaultBatch = Number(directionOption?.dataset?.batch || {{ default_batch_size }});
+      if (!isTeamLead || directionName !== selectedDirection()) return defaultBatch;
+      return Number(document.getElementById('batch_size').value || defaultBatch);
+    }
+
     function setStatus(message) {
       statusEl.textContent = message || 'Готово';
     }
 
     function syncActionButtons() {
-      startBtn.disabled = autoRunning;
-      pauseBtn.disabled = !autoRunning;
-      reconfigureBtn.disabled = !autoRunning;
-      stopBtn.disabled = !autoRunning;
+      const directionState = getDirectionState(selectedDirection());
+      const isRunningForDirection = Boolean(directionState.running);
+      startBtn.disabled = isRunningForDirection;
+      pauseBtn.disabled = !isRunningForDirection;
+      reconfigureBtn.disabled = !isRunningForDirection;
+      stopBtn.disabled = !isRunningForDirection;
     }
 
     function setCounts(inProgressCounts) {
@@ -364,17 +384,20 @@
       return data;
     }
 
-    async function runOnce() {
+    async function runOnce(directionName = selectedDirection()) {
+      const directionState = getDirectionState(directionName);
       const payload = {
-        direction: selectedDirection(),
-        batch_size: getBatchSizeValue(),
-        managers: selectedManagers(),
+        direction: directionName,
+        batch_size: getBatchSizeValueForDirection(directionName),
+        managers: directionState.managersSnapshot,
       };
       setStatus('Виконується...');
       try {
         const data = await postJson('/api/distribute-once', payload);
         setStatus(data.message || 'Готово');
-        updateSummary(data.summary);
+        if (selectedDirection() === directionName) {
+          updateSummary(data.summary);
+        }
         setCounts(data.in_progress_counts);
       } catch (err) {
         setStatus(`Помилка: ${err.message}`);
@@ -391,8 +414,17 @@
       });
     }
 
+    function startDirectionTimer(directionName) {
+      const interval = Math.max(5, readIntervalSecondsForDirection(directionName)) * 1000;
+      if (autoTimersByDirection[directionName]) clearInterval(autoTimersByDirection[directionName]);
+      autoTimersByDirection[directionName] = setInterval(() => runOnce(directionName), interval);
+      return interval;
+    }
+
     async function startAuto() {
-      if (autoRunning) return;
+      const directionName = selectedDirection();
+      const directionState = getDirectionState(directionName);
+      if (directionState.running) return;
       const managers = selectedManagers();
       if (!managers.length) {
         setStatus('Оберіть хоча б одного менеджера для авто-розподілу.');
@@ -400,40 +432,44 @@
       }
 
       await sendControl('start');
-      autoManagersSnapshot = managers;
-      autoRunning = true;
+      directionState.managersSnapshot = managers;
+      directionState.running = true;
       syncActionButtons();
-      const interval = Math.max(5, readIntervalSeconds()) * 1000;
-      await runOnce();
-      autoTimer = setInterval(runOnce, interval);
+      const interval = startDirectionTimer(directionName);
+      await runOnce(directionName);
       saveAutoState();
       saveUiState();
       setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
     }
 
     async function pauseAuto() {
-      if (!autoRunning) {
+      const directionName = selectedDirection();
+      const directionState = getDirectionState(directionName);
+      if (!directionState.running) {
         setStatus('Авто-розподіл вже на паузі.');
         return;
       }
       const reason = prompt('Вкажіть причину паузи:');
       if (!reason) return;
       await sendControl('pause', reason);
-      if (autoTimer) clearInterval(autoTimer);
-      autoTimer = null;
-      autoRunning = false;
+      if (autoTimersByDirection[directionName]) clearInterval(autoTimersByDirection[directionName]);
+      delete autoTimersByDirection[directionName];
+      directionState.running = false;
       syncActionButtons();
       saveAutoState();
       setStatus('Авто-розподіл на паузі.');
     }
 
     async function stopAuto() {
+      const directionName = selectedDirection();
+      const directionState = getDirectionState(directionName);
       const reason = prompt('Вкажіть причину зупинки:');
       if (!reason) return;
       await sendControl('stop', reason);
-      if (autoTimer) clearInterval(autoTimer);
-      autoTimer = null;
-      autoRunning = false;
+      if (autoTimersByDirection[directionName]) clearInterval(autoTimersByDirection[directionName]);
+      delete autoTimersByDirection[directionName];
+      directionState.running = false;
+      directionState.managersSnapshot = [];
       syncActionButtons();
       saveAutoState();
       setStatus('Авто-розподіл зупинено.');
@@ -487,8 +523,9 @@
         return;
       }
 
-      await sendControl('reconfigure', reason, autoManagersSnapshot);
-      autoManagersSnapshot = updatedManagers;
+      const directionState = getDirectionState(selectedDirection());
+      await sendControl('reconfigure', reason, directionState.managersSnapshot);
+      directionState.managersSnapshot = updatedManagers;
       saveAutoState();
       saveUiState();
       refreshSummaryTable();
@@ -538,17 +575,10 @@
     }
 
     document.getElementById('direction').addEventListener('change', () => {
-      if (autoRunning) {
-        if (autoTimer) clearInterval(autoTimer);
-        autoTimer = null;
-        autoRunning = false;
-        syncActionButtons();
-        saveAutoState();
-        setStatus('Напрямок змінено. Для нового напрямку авто-розподіл потрібно запустити окремо.');
-      }
       syncBatchSizeFromDirection();
       renderManagersForDirection(selectedDirection());
       renderSummaryHeader();
+      syncActionButtons();
       saveUiState();
     });
     if (toggleManagerPanelBtn && managerPanel) {
@@ -582,15 +612,22 @@
     renderSummaryHeader();
     refreshSummaryTable();
     const autoState = loadAutoState();
-    autoManagersSnapshot = autoState.managersSnapshot;
+    Object.entries(autoState).forEach(([directionName, state]) => {
+      autoStateByDirection[directionName] = {
+        running: Boolean(state?.running),
+        managersSnapshot: Array.isArray(state?.managersSnapshot) ? state.managersSnapshot : [],
+      };
+    });
     syncActionButtons();
-    if (autoState.running) {
-      autoRunning = true;
-      syncActionButtons();
-      const interval = Math.max(5, readIntervalSeconds()) * 1000;
-      autoTimer = setInterval(runOnce, interval);
-      setStatus(`Авто-розподіл відновлено після оновлення сторінки (кожні ${interval / 1000} сек).`);
-      runOnce();
+    const runningDirections = Object.entries(autoStateByDirection)
+      .filter(([, state]) => Boolean(state?.running))
+      .map(([directionName]) => directionName);
+    runningDirections.forEach((directionName) => {
+      startDirectionTimer(directionName);
+      runOnce(directionName);
+    });
+    if (runningDirections.length > 0) {
+      setStatus(`Авто-розподіл відновлено для напрямків: ${runningDirections.join(', ')}.`);
     }
   </script>
 </body>
