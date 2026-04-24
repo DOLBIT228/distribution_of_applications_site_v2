@@ -17,8 +17,9 @@ button.danger-outline { background: #fff; color: #bf2f3f; border: 1px solid #bf2
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
 .managers-list { max-height: 220px; overflow: auto; padding-right: 4px; }
-.hidden { display: none; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(20, 35, 65, .45); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
+.hidden { display: none; }
+.modal-backdrop.hidden { display: none; }
 .modal { width: min(520px, 100%); margin: 0; }
 small { color: #60739a; }
 .flash.error { color: #b00020; }
