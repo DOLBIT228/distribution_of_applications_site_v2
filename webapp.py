@@ -583,7 +583,13 @@ def distribute_once_api():
     payload = request.get_json(force=True)
     direction_name = str(payload.get("direction", "")).strip()
     selected_managers = [str(m) for m in payload.get("managers", [])]
-    batch_size = int(payload.get("batch_size", DEFAULT_BATCH_SIZE))
+    directions = get_direction_config()
+    if direction_name not in directions:
+        return jsonify({"status": "warning", "message": "Вибраний напрямок не знайдено"}), 400
+
+    direction_batch = int(directions[direction_name].get("batch_size") or DEFAULT_BATCH_SIZE)
+    is_team_lead = session.get("user_role") == TEAM_LEAD_ROLE
+    batch_size = int(payload.get("batch_size", direction_batch)) if is_team_lead else direction_batch
 
     if not direction_name or not selected_managers:
         return jsonify({"status": "warning", "message": "Оберіть напрямок і менеджерів"}), 400

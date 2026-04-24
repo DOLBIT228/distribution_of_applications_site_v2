@@ -4,6 +4,7 @@ body.bg { margin: 0; font-family: Inter, system-ui, Arial, sans-serif; backgroun
 .stack { display: grid; gap: 10px; }
 .two-col { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
 .role-pill { display: inline-block; margin-left: 8px; background: #e9f0ff; color: #2e4f9d; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
 label { display: grid; gap: 6px; font-size: 14px; }
 input, select, button { font: inherit; padding: 10px; border-radius: 10px; border: 1px solid #b9caee; }
@@ -13,6 +14,8 @@ button.danger { background: #bf2f3f; }
 button.danger-outline { background: #fff; color: #bf2f3f; border: 1px solid #bf2f3f; }
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .grid2 { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.managers-list { max-height: 220px; overflow: auto; padding-right: 4px; }
+.hidden { display: none; }
 small { color: #60739a; }
 .flash.error { color: #b00020; }
 .status-note { margin: 0; color: #3f527a; }
