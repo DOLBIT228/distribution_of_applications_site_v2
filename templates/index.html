@@ -100,7 +100,6 @@
       </fieldset>
 
       <div class="actions">
-        <button id="run_once">Розподілити зараз</button>
         <button id="start_auto" class="secondary">Почати авто-розподіл</button>
         <button id="pause_auto" class="secondary">Пауза</button>
         <button id="reconfigure_auto" class="secondary">Пауза для зміни менеджерів</button>
@@ -139,7 +138,6 @@
   <script>
     const statusEl = document.getElementById('status');
     const countsEl = document.getElementById('counts');
-    const runBtn = document.getElementById('run_once');
     const startBtn = document.getElementById('start_auto');
     const pauseBtn = document.getElementById('pause_auto');
     const stopBtn = document.getElementById('stop_auto');
@@ -153,6 +151,8 @@
     const dealTypes = Array.from(document.querySelectorAll('#summary_table thead th')).slice(1)
       .map((th) => th.textContent.trim());
     let currentSummary = {{ summary | tojson }};
+    const STATE_KEY = 'distribution_ui_state_v1';
+    const AUTO_KEY = 'distribution_auto_state_v1';
 
     let autoTimer = null;
     let autoRunning = false;
@@ -164,6 +164,62 @@
 
     function selectedDirection() {
       return document.getElementById('direction').value;
+    }
+
+    function saveUiState() {
+      const payload = {
+        direction: selectedDirection(),
+        managers: selectedManagers(),
+        batchSize: Number(document.getElementById('batch_size')?.value || 0),
+      };
+      localStorage.setItem(STATE_KEY, JSON.stringify(payload));
+    }
+
+    function loadUiState() {
+      try {
+        const raw = localStorage.getItem(STATE_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        const directionEl = document.getElementById('direction');
+        if (saved?.direction && directionEl) {
+          const hasOption = Array.from(directionEl.options).some((option) => option.value === saved.direction);
+          if (hasOption) directionEl.value = saved.direction;
+        }
+        syncBatchSizeFromDirection();
+        if (isTeamLead && Number(saved?.batchSize || 0) > 0) {
+          document.getElementById('batch_size').value = Number(saved.batchSize);
+        }
+        const selectedSet = new Set(Array.isArray(saved?.managers) ? saved.managers : []);
+        if (selectedSet.size > 0) {
+          Array.from(document.querySelectorAll('#managers input[type="checkbox"]')).forEach((checkbox) => {
+            checkbox.checked = selectedSet.has(checkbox.value);
+          });
+        }
+      } catch (_) {
+        // ignore malformed localStorage payload
+      }
+    }
+
+    function saveAutoState() {
+      const payload = {
+        running: autoRunning,
+        managersSnapshot: autoManagersSnapshot,
+      };
+      localStorage.setItem(AUTO_KEY, JSON.stringify(payload));
+    }
+
+    function loadAutoState() {
+      try {
+        const raw = localStorage.getItem(AUTO_KEY);
+        if (!raw) return { running: false, managersSnapshot: [] };
+        const saved = JSON.parse(raw);
+        return {
+          running: Boolean(saved?.running),
+          managersSnapshot: Array.isArray(saved?.managersSnapshot) ? saved.managersSnapshot : [],
+        };
+      } catch (_) {
+        return { running: false, managersSnapshot: [] };
+      }
     }
 
     function readIntervalSeconds() {
@@ -287,6 +343,8 @@
       const interval = Math.max(5, readIntervalSeconds()) * 1000;
       await runOnce();
       autoTimer = setInterval(runOnce, interval);
+      saveAutoState();
+      saveUiState();
       setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
     }
 
@@ -301,6 +359,7 @@
       if (autoTimer) clearInterval(autoTimer);
       autoTimer = null;
       autoRunning = false;
+      saveAutoState();
       setStatus('Авто-розподіл на паузі.');
     }
 
@@ -311,6 +370,7 @@
       if (autoTimer) clearInterval(autoTimer);
       autoTimer = null;
       autoRunning = false;
+      saveAutoState();
       setStatus('Авто-розподіл зупинено.');
     }
 
@@ -319,6 +379,8 @@
       if (!reason) return;
       await sendControl('reconfigure', reason, autoManagersSnapshot);
       autoManagersSnapshot = selectedManagers();
+      saveAutoState();
+      saveUiState();
       setStatus('Склад менеджерів оновлено.');
     }
 
@@ -363,7 +425,16 @@
       }
     }
 
-    document.getElementById('direction').addEventListener('change', syncBatchSizeFromDirection);
+    document.getElementById('direction').addEventListener('change', () => {
+      syncBatchSizeFromDirection();
+      saveUiState();
+      if (autoRunning) {
+        if (autoTimer) clearInterval(autoTimer);
+        const interval = Math.max(5, readIntervalSeconds()) * 1000;
+        autoTimer = setInterval(runOnce, interval);
+        setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
+      }
+    });
     if (toggleManagerPanelBtn && managerPanel) {
       toggleManagerPanelBtn.addEventListener('click', () => {
         managerPanel.classList.toggle('hidden');
@@ -371,20 +442,34 @@
     }
     if (managerSearchEl) managerSearchEl.addEventListener('input', filterManagersList);
     if (managersContainer) {
-      managersContainer.addEventListener('change', refreshSummaryTable);
+      managersContainer.addEventListener('change', () => {
+        refreshSummaryTable();
+        saveUiState();
+      });
     }
-    runBtn.addEventListener('click', runOnce);
     startBtn.addEventListener('click', startAuto);
     pauseBtn.addEventListener('click', pauseAuto);
     stopBtn.addEventListener('click', stopAuto);
     reconfigureBtn.addEventListener('click', reconfigureAuto);
     if (clearBtn) clearBtn.addEventListener('click', clearDaily);
+    const batchSizeEl = document.getElementById('batch_size');
+    if (batchSizeEl) batchSizeEl.addEventListener('change', saveUiState);
 
     const addManagerForm = document.getElementById('add_manager_form');
     const removeManagerForm = document.getElementById('remove_manager_form');
     if (addManagerForm) addManagerForm.addEventListener('submit', handleAddManager);
     if (removeManagerForm) removeManagerForm.addEventListener('submit', handleRemoveManager);
+    loadUiState();
     refreshSummaryTable();
+    const autoState = loadAutoState();
+    autoManagersSnapshot = autoState.managersSnapshot;
+    if (autoState.running) {
+      autoRunning = true;
+      const interval = Math.max(5, readIntervalSeconds()) * 1000;
+      autoTimer = setInterval(runOnce, interval);
+      setStatus(`Авто-розподіл відновлено після оновлення сторінки (кожні ${interval / 1000} сек).`);
+      runOnce();
+    }
   </script>
 </body>
 </html>
