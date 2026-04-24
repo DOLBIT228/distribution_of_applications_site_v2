@@ -112,6 +112,25 @@
       <p id="counts" class="muted"></p>
     </section>
 
+    <div id="reconfigure_modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="reconfigure_modal_title">
+      <div class="modal card stack">
+        <h3 id="reconfigure_modal_title">Пауза для зміни менеджерів</h3>
+        <p class="muted">Вкажіть менеджера, якого потрібно виключити з авто-розподілу, та причину.</p>
+        <label>Менеджер для виключення
+          <select id="excluded_manager">
+            <option value="">Оберіть менеджера</option>
+          </select>
+        </label>
+        <label>Причина
+          <textarea id="reconfigure_reason" rows="3" placeholder="Опишіть причину..." required></textarea>
+        </label>
+        <div class="actions">
+          <button id="confirm_reconfigure" class="secondary" type="button">Готово</button>
+          <button id="cancel_reconfigure" class="danger-outline" type="button">Скасувати</button>
+        </div>
+      </div>
+    </div>
+
     <section class="card">
       <h2>Таблиця розподілу за сьогодні</h2>
       <table id="summary_table">
@@ -143,6 +162,11 @@
     const stopBtn = document.getElementById('stop_auto');
     const reconfigureBtn = document.getElementById('reconfigure_auto');
     const clearBtn = document.getElementById('clear_daily');
+    const reconfigureModal = document.getElementById('reconfigure_modal');
+    const excludedManagerEl = document.getElementById('excluded_manager');
+    const reconfigureReasonEl = document.getElementById('reconfigure_reason');
+    const confirmReconfigureBtn = document.getElementById('confirm_reconfigure');
+    const cancelReconfigureBtn = document.getElementById('cancel_reconfigure');
     const managerPanel = document.getElementById('manager_panel');
     const toggleManagerPanelBtn = document.getElementById('toggle_manager_panel');
     const managersContainer = document.getElementById('managers');
@@ -244,6 +268,13 @@
       statusEl.textContent = message || 'Готово';
     }
 
+    function syncActionButtons() {
+      startBtn.disabled = autoRunning;
+      pauseBtn.disabled = !autoRunning;
+      reconfigureBtn.disabled = !autoRunning;
+      stopBtn.disabled = !autoRunning;
+    }
+
     function setCounts(inProgressCounts) {
       if (!inProgressCounts || Object.keys(inProgressCounts).length === 0) {
         countsEl.textContent = '';
@@ -340,6 +371,7 @@
       await sendControl('start');
       autoManagersSnapshot = managers;
       autoRunning = true;
+      syncActionButtons();
       const interval = Math.max(5, readIntervalSeconds()) * 1000;
       await runOnce();
       autoTimer = setInterval(runOnce, interval);
@@ -359,6 +391,7 @@
       if (autoTimer) clearInterval(autoTimer);
       autoTimer = null;
       autoRunning = false;
+      syncActionButtons();
       saveAutoState();
       setStatus('Авто-розподіл на паузі.');
     }
@@ -370,17 +403,56 @@
       if (autoTimer) clearInterval(autoTimer);
       autoTimer = null;
       autoRunning = false;
+      syncActionButtons();
       saveAutoState();
       setStatus('Авто-розподіл зупинено.');
     }
 
+    function openReconfigureModal() {
+      if (!reconfigureModal || !excludedManagerEl || !reconfigureReasonEl) return;
+      const managers = selectedManagers();
+      excludedManagerEl.innerHTML = ['<option value="">Оберіть менеджера</option>', ...managers.map((manager) => `<option value="${manager}">${manager}</option>`)]
+        .join('');
+      reconfigureReasonEl.value = '';
+      reconfigureModal.classList.remove('hidden');
+    }
+
+    function closeReconfigureModal() {
+      if (!reconfigureModal) return;
+      reconfigureModal.classList.add('hidden');
+    }
+
     async function reconfigureAuto() {
-      const reason = prompt('Вкажіть причину зміни менеджерів:');
-      if (!reason) return;
+      openReconfigureModal();
+    }
+
+    async function confirmReconfigure() {
+      const excludedManager = excludedManagerEl?.value || '';
+      const reason = (reconfigureReasonEl?.value || '').trim();
+      if (!excludedManager) {
+        setStatus('Оберіть менеджера для виключення з авто-розподілу.');
+        return;
+      }
+      if (!reason) {
+        setStatus('Вкажіть причину зміни менеджерів.');
+        return;
+      }
+
+      const managerCheckbox = document.querySelector(`#managers input[type="checkbox"][value="${CSS.escape(excludedManager)}"]`);
+      if (managerCheckbox) managerCheckbox.checked = false;
+      const updatedManagers = selectedManagers();
+      if (!updatedManagers.length) {
+        setStatus('Потрібно залишити хоча б одного менеджера в авто-розподілі.');
+        if (managerCheckbox) managerCheckbox.checked = true;
+        return;
+      }
+
       await sendControl('reconfigure', reason, autoManagersSnapshot);
-      autoManagersSnapshot = selectedManagers();
+      autoManagersSnapshot = updatedManagers;
       saveAutoState();
       saveUiState();
+      refreshSummaryTable();
+      closeReconfigureModal();
       setStatus('Склад менеджерів оновлено.');
     }
 
@@ -451,6 +523,8 @@
     pauseBtn.addEventListener('click', pauseAuto);
     stopBtn.addEventListener('click', stopAuto);
     reconfigureBtn.addEventListener('click', reconfigureAuto);
+    if (confirmReconfigureBtn) confirmReconfigureBtn.addEventListener('click', confirmReconfigure);
+    if (cancelReconfigureBtn) cancelReconfigureBtn.addEventListener('click', closeReconfigureModal);
     if (clearBtn) clearBtn.addEventListener('click', clearDaily);
     const batchSizeEl = document.getElementById('batch_size');
     if (batchSizeEl) batchSizeEl.addEventListener('change', saveUiState);
@@ -463,8 +537,10 @@
     refreshSummaryTable();
     const autoState = loadAutoState();
     autoManagersSnapshot = autoState.managersSnapshot;
+    syncActionButtons();
     if (autoState.running) {
       autoRunning = true;
+      syncActionButtons();
       const interval = Math.max(5, readIntervalSeconds()) * 1000;
       autoTimer = setInterval(runOnce, interval);
       setStatus(`Авто-розподіл відновлено після оновлення сторінки (кожні ${interval / 1000} сек).`);
