@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import json
 import os
@@ -28,6 +28,22 @@ INSTAGRAM_DEAL_TYPES = ["Консультація", "Термін", "Повто�
 TEAM_LEAD_ROLE = "team_lead"
 MANAGER_ROLE = "manager"
 CONSULTATION_PREFIX = "КОНСУЛЬТАЦІЯ"
+REPEAT_PREFIX = "ПОВТОРНЕ"
+BASE_PREFIX = "БАЗА"
+BLOCK_PREFIX = "БЛОК"
+TERM_FIELD_CODE = "UF_CRM_1749123119"
+TERM_PRIORITY_ORDER = {
+    "46945": 0,  # Ближчим часом
+    "46947": 1,  # Завчасно
+    "46949": 2,  # Без терміну
+    "47027": 3,  # На майбутнє
+}
+TERM_PRIORITY_LABELS = {
+    "БЛИЖЧИМ ЧАСОМ": 0,
+    "ЗАВЧАСНО": 1,
+    "БЕЗ ТЕРМІНУ": 2,
+    "НА МАЙБУТНЄ": 3,
+}
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_vps")
@@ -220,7 +236,7 @@ def fetch_deals(category_id: int, stage_id: str, limit: int | None = None) -> Li
         payload = {
             "filter": {"CATEGORY_ID": category_id, "STAGE_ID": stage_id},
             "order": {"ID": "ASC"},
-            "select": ["ID", "TITLE", "ASSIGNED_BY_ID", "SOURCE_ID"],
+            "select": ["ID", "TITLE", "ASSIGNED_BY_ID", "SOURCE_ID", TERM_FIELD_CODE, "DATE_MODIFY"],
             "start": start,
         }
         data = bitrix_request("crm.deal.list", payload)
@@ -264,7 +280,45 @@ def classify_deal_type(deal: Dict, source_map: Dict[str, str], logic: str) -> st
     if logic == "site":
         return SITE_DEAL_TYPES[0]
     title = str(deal.get("TITLE") or "").strip().upper()
-    return "Консультація" if title.startswith(CONSULTATION_PREFIX) else "Термін"
+    if title.startswith(CONSULTATION_PREFIX):
+        return "Консультація"
+    if title.startswith(REPEAT_PREFIX):
+        return "Повторне"
+    if title.startswith(BASE_PREFIX):
+        return "База"
+    return "Термін"
+
+
+def is_blocked_deal(deal: Dict) -> bool:
+    title = str(deal.get("TITLE") or "").strip().upper()
+    return title.startswith(BLOCK_PREFIX)
+
+
+def parse_term_priority(value: str | None) -> int:
+    if value is None:
+        return max(TERM_PRIORITY_ORDER.values()) + 1
+    text_value = str(value).strip()
+    if not text_value:
+        return max(TERM_PRIORITY_ORDER.values()) + 1
+    if text_value in TERM_PRIORITY_ORDER:
+        return TERM_PRIORITY_ORDER[text_value]
+    upper_value = text_value.upper()
+    if upper_value in TERM_PRIORITY_LABELS:
+        return TERM_PRIORITY_LABELS[upper_value]
+    return max(TERM_PRIORITY_ORDER.values()) + 1
+
+
+def parse_datetime_value(value: str | None) -> datetime:
+    if not value:
+        return datetime.max
+    text_value = str(value).strip()
+    if not text_value:
+        return datetime.max
+    text_value = text_value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text_value)
+    except ValueError:
+        return datetime.max
 
 
 def update_deal_assignment_and_stage(deal_id: int, manager_id: int, next_stage_id: str) -> None:
@@ -285,6 +339,65 @@ def init_db() -> None:
                 deal_id INTEGER NOT NULL
             )
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS distribution_control_state (
+                distribution_date TEXT NOT NULL,
+                direction_name TEXT NOT NULL,
+                is_running INTEGER NOT NULL DEFAULT 0,
+                managers_json TEXT NOT NULL DEFAULT '[]',
+                updated_by TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (distribution_date, direction_name)
+            )
+            """
+        )
+        conn.commit()
+
+
+def get_control_state(direction_name: str) -> Dict:
+    distribution_date = date.today().isoformat()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        row = conn.execute(
+            """
+            SELECT is_running, managers_json, updated_by, updated_at
+            FROM distribution_control_state
+            WHERE distribution_date = ? AND direction_name = ?
+            """,
+            (distribution_date, direction_name),
+        ).fetchone()
+    if not row:
+        return {"running": False, "managers": []}
+    try:
+        managers = json.loads(str(row[1] or "[]"))
+    except json.JSONDecodeError:
+        managers = []
+    return {"running": bool(int(row[0])), "managers": managers, "updated_by": row[2], "updated_at": row[3]}
+
+
+def set_control_state(direction_name: str, running: bool, managers: List[str], updated_by: str) -> None:
+    distribution_date = date.today().isoformat()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            """
+            INSERT INTO distribution_control_state (
+                distribution_date, direction_name, is_running, managers_json, updated_by, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(distribution_date, direction_name) DO UPDATE SET
+                is_running = excluded.is_running,
+                managers_json = excluded.managers_json,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                distribution_date,
+                direction_name,
+                1 if running else 0,
+                json.dumps(managers, ensure_ascii=False),
+                updated_by,
+                datetime.utcnow().isoformat(),
+            ),
         )
         conn.commit()
 
@@ -506,7 +619,16 @@ def run_distribution_once(direction_name: str, selected_managers: List[str], bat
         return {"status": "info", "message": "Немає заявок для розподілу", "results": []}
 
     max_for_batch = sum(remaining_slots[m] for m in available_managers)
-    target_deals = deals_all[: min(len(deals_all), max_for_batch)]
+    eligible_deals = [deal for deal in deals_all if not is_blocked_deal(deal)]
+    if logic == "instagram":
+        eligible_deals.sort(
+            key=lambda deal: (
+                parse_term_priority(str(deal.get(TERM_FIELD_CODE) or "")),
+                parse_datetime_value(str(deal.get("DATE_MODIFY") or "")),
+                int(deal.get("ID") or 0),
+            )
+        )
+    target_deals = eligible_deals[: min(len(eligible_deals), max_for_batch)]
     manager_state = get_daily_manager_state(direction_name, available_managers, deal_types)
 
     results = []
@@ -646,6 +768,17 @@ def summary_api():
     return jsonify({"status": "success", "summary": get_daily_summary(direction_name)})
 
 
+@app.get("/api/control-state")
+@login_required
+def control_state_api():
+    direction_name = str(request.args.get("direction", "")).strip()
+    if not direction_name:
+        return jsonify({"status": "warning", "message": "Не задано напрямок"}), 400
+    if direction_name not in get_accessible_directions_for_user():
+        return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
+    return jsonify({"status": "success", "control": get_control_state(direction_name)})
+
+
 @app.post("/api/distribute-once")
 @login_required
 def distribute_once_api():
@@ -691,6 +824,7 @@ def control_api():
         return jsonify({"status": "warning", "message": "Причина обов'язкова"}), 400
 
     if action == "start":
+        set_control_state(direction_name, True, selected_managers, str(session.get("user_name", "")))
         managers_text = ", ".join(selected_managers) if selected_managers else "не обрано"
         send_chatbot_message(
             "\n".join(
@@ -705,6 +839,8 @@ def control_api():
         return jsonify({"status": "success", "message": "Авто-розподіл запущено"})
 
     if action == "pause":
+        state = get_control_state(direction_name)
+        set_control_state(direction_name, False, [str(m) for m in state.get("managers", [])], str(session.get("user_name", "")))
         send_chatbot_message(
             "\n".join(
                 [
@@ -718,6 +854,7 @@ def control_api():
         return jsonify({"status": "success", "message": "Авто-розподіл на паузі"})
 
     if action == "stop":
+        set_control_state(direction_name, False, [], str(session.get("user_name", "")))
         directions = get_direction_config()
         direction_cfg = directions.get(direction_name, {})
         deal_types = get_deal_types_for_logic(get_direction_logic(direction_name, direction_cfg))
@@ -740,6 +877,7 @@ def control_api():
         return jsonify({"status": "success", "message": "Авто-розподіл зупинено"})
 
     if action == "reconfigure":
+        set_control_state(direction_name, True, selected_managers, str(session.get("user_name", "")))
         previous_managers = [str(m) for m in payload.get("previous_managers", [])]
         previous_text = ", ".join(previous_managers) if previous_managers else "не обрано"
         new_text = ", ".join(selected_managers) if selected_managers else "не обрано"
