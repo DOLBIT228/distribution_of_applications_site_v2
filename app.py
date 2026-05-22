@@ -324,6 +324,51 @@ def init_db() -> None:
         }
         if "term_group" not in existing_columns:
             conn.execute("ALTER TABLE distribution_history ADD COLUMN term_group TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS distribution_control_state (
+                direction_name TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_control_state(direction_name: str) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT state
+            FROM distribution_control_state
+            WHERE direction_name = ?
+            """,
+            (direction_name,),
+        ).fetchone()
+        if not row:
+            return "stopped"
+        return str(row[0] or "stopped")
+    finally:
+        conn.close()
+
+
+def set_control_state(direction_name: str, state: str) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO distribution_control_state (direction_name, state, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(direction_name) DO UPDATE SET
+                state = excluded.state,
+                updated_at = excluded.updated_at
+            """,
+            (direction_name, state, datetime.utcnow().isoformat()),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1002,7 +1047,7 @@ def distribution_screen() -> None:
         runtime_by_direction = st.session_state["direction_runtime"]
         if direction_name not in runtime_by_direction:
             runtime_by_direction[direction_name] = {
-                "auto_distribution_state": "stopped",
+                "auto_distribution_state": get_control_state(direction_name),
                 "auto_distribution_last_run": None,
                 "last_in_progress_counts": {},
                 "pending_control_action": None,
@@ -1046,6 +1091,11 @@ def distribution_screen() -> None:
     if st.button("Оновити статус"):
         st.rerun()
 
+    # Глобальний стан у БД синхронізуємо на кожному рендері.
+    shared_control_state = get_control_state(direction_name)
+    if direction_runtime.get("auto_distribution_state") != shared_control_state:
+        direction_runtime["auto_distribution_state"] = shared_control_state
+
     available_count = len(deals_all)
     st.info(f"Знайдено заявок у статусі: **{available_count}**")
 
@@ -1065,6 +1115,7 @@ def distribution_screen() -> None:
             ):
                 direction_runtime["active_managers"] = selected_managers.copy()
                 direction_runtime["auto_distribution_state"] = "running"
+                set_control_state(direction_name, "running")
                 direction_runtime["pending_control_action"] = None
                 managers_text = ", ".join(direction_runtime["active_managers"]) if direction_runtime["active_managers"] else "не обрано"
                 send_chatbot_message(
@@ -1098,6 +1149,7 @@ def distribution_screen() -> None:
             ):
                 direction_runtime["reconfig_previous_managers"] = list(direction_runtime.get("active_managers", []))
                 direction_runtime["auto_distribution_state"] = "reconfiguring"
+                set_control_state(direction_name, "reconfiguring")
                 direction_runtime["pending_control_action"] = None
                 st.rerun()
 
@@ -1119,6 +1171,7 @@ def distribution_screen() -> None:
                 else:
                     if pending_action == "pause":
                         direction_runtime["auto_distribution_state"] = "paused"
+                        set_control_state(direction_name, "paused")
                         send_chatbot_message(
                             "\n".join(
                                 [
@@ -1131,6 +1184,7 @@ def distribution_screen() -> None:
                         )
                     else:
                         direction_runtime["auto_distribution_state"] = "stopped"
+                        set_control_state(direction_name, "stopped")
                         direction_runtime["auto_distribution_last_run"] = None
                         stop_report = build_stop_report_message(direction_name, selected_managers, deal_types)
                         send_chatbot_message(
@@ -1158,6 +1212,7 @@ def distribution_screen() -> None:
         if not active_managers:
             st.warning("Авто-режим зупинено: оберіть хоча б одного менеджера для розподілу.")
             direction_runtime["auto_distribution_state"] = "stopped"
+            set_control_state(direction_name, "stopped")
             st.rerun()
 
         st.success(
@@ -1216,6 +1271,7 @@ def distribution_screen() -> None:
             if cancel_change:
                 direction_runtime["reconfig_previous_managers"] = []
                 direction_runtime["auto_distribution_state"] = "running"
+                set_control_state(direction_name, "running")
                 st.rerun()
 
             if apply_change:
@@ -1224,6 +1280,7 @@ def distribution_screen() -> None:
                 else:
                     direction_runtime["active_managers"] = selected_managers.copy()
                     direction_runtime["auto_distribution_state"] = "running"
+                    set_control_state(direction_name, "running")
                     direction_runtime["reconfig_previous_managers"] = []
 
                     previous_text = ", ".join(previous_managers) if previous_managers else "не обрано"
