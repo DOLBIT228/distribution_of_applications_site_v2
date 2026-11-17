@@ -5,14 +5,17 @@ from contextlib import closing
 from datetime import date, datetime, time, timedelta
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 from pathlib import Path
+import hmac
 import json
 import os
 import sqlite3
+import threading
 from functools import wraps
 from typing import Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 load_dotenv()
@@ -49,9 +52,26 @@ TERM_PRIORITY_LABELS = {
 }
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_vps")
+# Ключем підписуються cookie сесій: з відомим ключем будь-хто підробить сесію Team Lead.
+_secret_key = str(os.getenv("FLASK_SECRET_KEY", "") or "").strip()
+if len(_secret_key) < 32 or _secret_key == "change_me_in_vps":
+    raise RuntimeError(
+        "Задайте FLASK_SECRET_KEY у .env: випадковий рядок від 32 символів "
+        "(python -c \"import secrets; print(secrets.token_hex(32))\")."
+    )
+app.secret_key = _secret_key
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+# Lax: браузер не надсилає cookie з POST-запитами з чужих сайтів (захист від CSRF).
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+# Увімкніть (SESSION_COOKIE_SECURE=true), щойно сайт працює через HTTPS.
+app.config["SESSION_COOKIE_SECURE"] = str(os.getenv("SESSION_COOKIE_SECURE", "")).strip().lower() in {"1", "true", "yes"}
+
+LOGIN_ATTEMPTS_LIMIT = 10
+LOGIN_ATTEMPTS_WINDOW = timedelta(minutes=15)
+_login_failures: Dict[str, List[datetime]] = {}
+_login_lock = threading.Lock()
 
 
 def _env_required(key: str) -> str:
@@ -122,18 +142,81 @@ def get_managers_for_direction(direction_name: str) -> Dict[str, int]:
     return {**own, **others}
 
 
+def _is_password_hash(value: str) -> bool:
+    return value.startswith(("scrypt:", "pbkdf2:"))
+
+
+def _password_matches(stored: str, password: str) -> bool:
+    if _is_password_hash(stored):
+        return check_password_hash(stored, password)
+    # Старий запис відкритим текстом: після успішного входу його замінить хеш.
+    return bool(stored) and hmac.compare_digest(stored.encode("utf-8"), password.encode("utf-8"))
+
+
+_DUMMY_PASSWORD_HASH = generate_password_hash("not-a-real-password")
+
+
+def _session_user(user: Dict) -> Dict:
+    return {
+        "login": str(user["login"]),
+        "name": str(user.get("name") or user["login"]),
+        "manager_id": int(user["manager_id"]),
+        "role": normalize_role(str(user.get("role") or MANAGER_ROLE)),
+        "direction": str(user.get("direction") or "").strip(),
+    }
+
+
+def _store_session_user(user: Dict) -> None:
+    session["user_login"] = user["login"]
+    session["user_name"] = user["name"]
+    session["user_role"] = user["role"]
+    session["user_manager_id"] = user["manager_id"]
+    session["user_direction"] = user.get("direction", "")
+
+
+def find_config_user(login: str) -> Optional[Dict]:
+    return next((user for user in get_config_users() if str(user["login"]) == login), None)
+
+
 def get_auth_user(login: str, password: str) -> Optional[Dict]:
-    for user in get_config_users():
-        if str(user["login"]) == login and str(user["password"]) == password:
-            user_direction = str(user.get("direction") or "").strip()
-            return {
-                "login": str(user["login"]),
-                "name": str(user.get("name") or user["login"]),
-                "manager_id": int(user["manager_id"]),
-                "role": normalize_role(str(user.get("role") or MANAGER_ROLE)),
-                "direction": user_direction,
-            }
+    users = get_config_users()
+    for user in users:
+        if str(user["login"]) != login:
+            continue
+        stored = str(user.get("password") or "")
+        if not _password_matches(stored, password):
+            return None
+        if not _is_password_hash(stored):
+            user["password"] = generate_password_hash(password)
+            _save_json_list(USERS_CONFIG_PATH, users)
+        return _session_user(user)
+    # Той самий час відповіді, що й для існуючого логіна з неправильним паролем.
+    check_password_hash(_DUMMY_PASSWORD_HASH, password)
     return None
+
+
+def _client_ip() -> str:
+    # За nginx (README) справжня адреса приходить у X-Real-IP; напряму довіряємо лише remote_addr.
+    remote = str(request.remote_addr or "")
+    if remote in {"127.0.0.1", "::1"}:
+        return str(request.headers.get("X-Real-IP") or remote)
+    return remote
+
+
+def _too_many_login_failures(ip: str) -> bool:
+    now = datetime.now()
+    with _login_lock:
+        recent = [moment for moment in _login_failures.get(ip, []) if now - moment < LOGIN_ATTEMPTS_WINDOW]
+        if recent:
+            _login_failures[ip] = recent
+        else:
+            _login_failures.pop(ip, None)
+        return len(recent) >= LOGIN_ATTEMPTS_LIMIT
+
+
+def _record_login_failure(ip: str) -> None:
+    with _login_lock:
+        _login_failures.setdefault(ip, []).append(datetime.now())
 
 
 def add_manager_account(name: str, login: str, password: str, bitrix_id: int, direction: str) -> Tuple[bool, str]:
@@ -163,7 +246,7 @@ def add_manager_account(name: str, login: str, password: str, bitrix_id: int, di
     users.append(
         {
             "login": login_clean,
-            "password": password_clean,
+            "password": generate_password_hash(password_clean),
             "name": name_clean,
             "manager_id": int(bitrix_id),
             "role": MANAGER_ROLE,
@@ -718,6 +801,16 @@ def login_required(fn):
     def wrapper(*args, **kwargs):
         if not session.get("user_login"):
             return redirect(url_for("login"))
+        # Роль і напрямок щоразу з users.json: видалений чи понижений користувач
+        # не зберігає доступ на всі 30 днів життя cookie.
+        user = find_config_user(str(session["user_login"]))
+        if not user:
+            session.clear()
+            return redirect(url_for("login"))
+        _store_session_user(_session_user(user))
+        # Лише справжній JSON: форма з чужого сайту не може надіслати application/json.
+        if request.method == "POST" and request.path.startswith("/api/") and not request.is_json:
+            return jsonify({"status": "error", "message": "Очікується JSON"}), 415
         return fn(*args, **kwargs)
 
     return wrapper
@@ -746,17 +839,19 @@ def team_lead_required(fn):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        ip = _client_ip()
+        if _too_many_login_failures(ip):
+            flash("Забагато невдалих спроб. Спробуйте за 15 хвилин.", "error")
+            return render_template("login.html"), 429
         login_value = str(request.form.get("login", "")).strip()
         password = str(request.form.get("password", "")).strip()
         user = get_auth_user(login_value, password)
         if not user:
+            _record_login_failure(ip)
             flash("Невірний логін або пароль", "error")
             return render_template("login.html")
-        session["user_login"] = user["login"]
-        session["user_name"] = user["name"]
-        session["user_role"] = user["role"]
-        session["user_manager_id"] = user["manager_id"]
-        session["user_direction"] = user.get("direction", "")
+        session.clear()
+        _store_session_user(user)
         session.permanent = True
         return redirect(url_for("index"))
     return render_template("login.html")
@@ -833,7 +928,7 @@ def control_state_api():
 @app.post("/api/distribute-once")
 @login_required
 def distribute_once_api():
-    payload = request.get_json(force=True)
+    payload = (request.get_json(silent=True) or {})
     direction_name = str(payload.get("direction", "")).strip()
     selected_managers = [str(m) for m in payload.get("managers", [])]
     directions = get_direction_config()
@@ -870,7 +965,7 @@ def distribute_once_api():
 @app.post("/api/control")
 @login_required
 def control_api():
-    payload = request.get_json(force=True)
+    payload = (request.get_json(silent=True) or {})
     action = str(payload.get("action", "")).strip()
     direction_name = str(payload.get("direction", "")).strip()
     selected_managers = [str(m) for m in payload.get("managers", [])]
@@ -961,7 +1056,7 @@ def control_api():
 @login_required
 @team_lead_required
 def add_manager_api():
-    payload = request.get_json(force=True)
+    payload = (request.get_json(silent=True) or {})
     name = str(payload.get("name", "")).strip()
     login_value = str(payload.get("login", "")).strip()
     password = str(payload.get("password", "")).strip()
@@ -983,7 +1078,7 @@ def add_manager_api():
 @login_required
 @team_lead_required
 def remove_manager_api():
-    payload = request.get_json(force=True)
+    payload = (request.get_json(silent=True) or {})
     login_or_name = str(payload.get("login_or_name", "")).strip()
     ok, message = remove_manager_account(login_or_name=login_or_name, current_user_login=str(session.get("user_login")))
     status = "success" if ok else "error"
@@ -995,7 +1090,7 @@ def remove_manager_api():
 @login_required
 @team_lead_required
 def clear_daily_api():
-    payload = request.get_json(force=True)
+    payload = (request.get_json(silent=True) or {})
     direction_name = str(payload.get("direction", "")).strip()
     if not direction_name:
         return jsonify({"status": "warning", "message": "Оберіть напрямок"}), 400
