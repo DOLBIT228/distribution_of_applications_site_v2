@@ -101,8 +101,9 @@ cp config/directions.example.json config/directions.json
 
 Обовʼязково заповніть:
 - `BITRIX_WEBHOOK_URL`
-- `FLASK_SECRET_KEY`
-- логіни/паролі у `config/users.json`
+- `FLASK_SECRET_KEY` — випадковий рядок від 32 символів (`python -c "import secrets; print(secrets.token_hex(32))"`); без нього сервер не стартує
+- логіни/паролі у `config/users.json` (паролі можна вписати відкритим текстом: при першому вході кожен буде замінено хешем)
+- `SESSION_COOKIE_SECURE=true`, щойно сайт працює через HTTPS
 
 ### 5) systemd сервіс (Flask)
 
