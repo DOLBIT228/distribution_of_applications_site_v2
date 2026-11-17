@@ -110,13 +110,16 @@ def get_manager_direction_map() -> Dict[str, str]:
 
 
 def get_managers_for_direction(direction_name: str) -> Dict[str, int]:
+    """All managers are available for every direction; own-direction managers go first."""
     manager_options = get_managers_config()
     manager_directions = get_manager_direction_map()
-    return {
-        manager_name: manager_id
-        for manager_name, manager_id in manager_options.items()
-        if str(manager_directions.get(manager_name) or "").strip() == direction_name
+    own = {
+        name: manager_id
+        for name, manager_id in manager_options.items()
+        if str(manager_directions.get(name) or "").strip() == direction_name
     }
+    others = {name: manager_id for name, manager_id in manager_options.items() if name not in own}
+    return {**own, **others}
 
 
 def get_auth_user(login: str, password: str) -> Optional[Dict]:
@@ -792,6 +795,7 @@ def index():
         accessible_directions=accessible_directions,
         managers=managers,
         managers_by_direction=managers_by_direction,
+        manager_home_directions=get_manager_direction_map(),
         selected_direction=selected_direction,
         summary=summary,
         deal_types=deal_types_by_direction[selected_direction],

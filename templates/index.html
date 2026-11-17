@@ -104,7 +104,8 @@
         </label>
         <div class="grid2 managers-list" id="managers">
           {% for manager_name, manager_id in managers.items() %}
-          <label><input type="checkbox" value="{{ manager_name }}" checked /> {{ manager_name }} <small>(ID: {{ manager_id }})</small></label>
+          {% set home = manager_home_directions.get(manager_name, '') %}
+          <label><input type="checkbox" value="{{ manager_name }}" {% if not home or home == selected_direction %}checked{% endif %} /> {{ manager_name }} <small>(ID: {{ manager_id }}{% if home and home != selected_direction %}, {{ home }}{% endif %})</small></label>
           {% endfor %}
         </div>
       </fieldset>
@@ -182,6 +183,7 @@
     const managerSearchEl = document.getElementById('manager_search');
     const isTeamLead = {{ 'true' if user_role == 'team_lead' else 'false' }};
     const managersByDirection = {{ managers_by_direction | tojson }};
+    const managerHomeDirections = {{ manager_home_directions | tojson }};
     const dealTypesByDirection = {{ deal_types_by_direction | tojson }};
     let currentSummary = {{ summary | tojson }};
     const STATE_KEY = 'distribution_ui_state_v1';
@@ -196,13 +198,22 @@
       return document.getElementById('direction').value;
     }
 
-    function renderManagersForDirection(directionName) {
+    function isOwnManager(managerName, directionName) {
+      const home = managerHomeDirections?.[managerName] || '';
+      return !home || home === directionName;
+    }
+
+    function renderManagersForDirection(directionName, resetSelection = false) {
       const managerMap = managersByDirection?.[directionName] || {};
-      const previouslySelected = new Set(selectedManagers());
+      const previouslySelected = resetSelection ? new Set() : new Set(selectedManagers());
       managersContainer.innerHTML = Object.entries(managerMap)
         .map(([managerName, managerId]) => {
-          const isChecked = previouslySelected.size === 0 || previouslySelected.has(managerName);
-          return `<label><input type="checkbox" value="${managerName}" ${isChecked ? 'checked' : ''} /> ${managerName} <small>(ID: ${managerId})</small></label>`;
+          const isChecked = previouslySelected.size === 0
+            ? isOwnManager(managerName, directionName)
+            : previouslySelected.has(managerName);
+          const home = managerHomeDirections?.[managerName] || '';
+          const homeLabel = home && home !== directionName ? `, ${home}` : '';
+          return `<label><input type="checkbox" value="${managerName}" ${isChecked ? 'checked' : ''} /> ${managerName} <small>(ID: ${managerId}${homeLabel})</small></label>`;
         })
         .join('');
       filterManagersList();
@@ -569,7 +580,7 @@
 
     document.getElementById('direction').addEventListener('change', async () => {
       syncBatchSizeFromDirection();
-      renderManagersForDirection(selectedDirection());
+      renderManagersForDirection(selectedDirection(), true);
       renderSummaryHeader();
       await syncControlStateFromServer(selectedDirection());
       syncActionButtons();
