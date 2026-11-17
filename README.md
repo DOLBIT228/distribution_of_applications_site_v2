@@ -1,4 +1,4 @@
-# 📥 Розподіл заявок Bitrix24 (Streamlit + Flask Web UI + VPS-ready)
+# 📥 Розподіл заявок Bitrix24 (Flask Web UI, VPS)
 
 Застосунок для авто-розподілу заявок у Bitrix24 між менеджерами.
 
@@ -7,9 +7,7 @@
 - **Team Lead**: може запускати/зупиняти/ставити на паузу авто-розподіл, обирати менеджерів на зміні, змінювати розмір пачки та додавати нових менеджерів (ім'я, логін, пароль, Bitrix24 ID).
 - **Manager**: може лише обирати менеджерів на зміні та керувати процесом запуску/зупинки/паузи розподілу.
 
-Тепер у репозиторії є **два інтерфейси**:
-- `app.py` — поточний Streamlit-інтерфейс.
-- `webapp.py` — веб-інтерфейс на Flask, який працює через URL (зручно для VPS + Nginx).
+Інтерфейс — `webapp.py` (Flask), працює на VPS за Nginx: http://91.207.55.99/
 
 ## Що зберігається на VPS
 
@@ -26,7 +24,6 @@
 
 ```text
 .
-├── app.py
 ├── webapp.py
 ├── templates/
 │   ├── login.html
@@ -39,7 +36,6 @@
 │   ├── users.example.json
 │   ├── managers.example.json
 │   └── directions.example.json
-├── onboarding_media/
 ├── deployment/
 │   └── systemd-distribution.service.example
 └── README.md
@@ -159,14 +155,6 @@ server {
 ```
 
 Після цього UI доступний за URL домену.
-
----
-
-## Streamlit-режим (за потреби)
-
-```bash
-streamlit run app.py
-```
 
 ---
 
