@@ -1,0 +1,10 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+.DS_Store
+config/users.json
+config/managers.json
+config/directions.json

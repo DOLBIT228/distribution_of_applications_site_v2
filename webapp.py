@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 from pathlib import Path
 import json
 import os
@@ -12,7 +13,6 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 
 load_dotenv()
@@ -31,6 +31,9 @@ CONSULTATION_PREFIX = "КОНСУЛЬТАЦІЯ"
 REPEAT_PREFIX = "ПОВТОРНЕ"
 BASE_PREFIX = "БАЗА"
 BLOCK_PREFIX = "БЛОК"
+WORKING_HOURS_START = 10
+WORKING_HOURS_END = 19
+FRESH_LEAD_MINUTES = 15
 TERM_FIELD_CODE = "UF_CRM_1749123119"
 TERM_PRIORITY_ORDER = {
     "46945": 0,  # Ближчим часом
@@ -47,6 +50,8 @@ TERM_PRIORITY_LABELS = {
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change_me_in_vps")
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
 
 def _env_required(key: str) -> str:
@@ -236,7 +241,15 @@ def fetch_deals(category_id: int, stage_id: str, limit: int | None = None) -> Li
         payload = {
             "filter": {"CATEGORY_ID": category_id, "STAGE_ID": stage_id},
             "order": {"ID": "ASC"},
-            "select": ["ID", "TITLE", "ASSIGNED_BY_ID", "SOURCE_ID", TERM_FIELD_CODE, "DATE_MODIFY"],
+            "select": [
+                "ID",
+                "TITLE",
+                "ASSIGNED_BY_ID",
+                "SOURCE_ID",
+                TERM_FIELD_CODE,
+                "DATE_MODIFY",
+                "DATE_CREATE",
+            ],
             "start": start,
         }
         data = bitrix_request("crm.deal.list", payload)
@@ -291,7 +304,7 @@ def classify_deal_type(deal: Dict, source_map: Dict[str, str], logic: str) -> st
 
 def is_blocked_deal(deal: Dict) -> bool:
     title = str(deal.get("TITLE") or "").strip().upper()
-    return title.startswith(BLOCK_PREFIX)
+    return BLOCK_PREFIX in title
 
 
 def parse_term_priority(value: str | None) -> int:
@@ -319,6 +332,33 @@ def parse_datetime_value(value: str | None) -> datetime:
         return datetime.fromisoformat(text_value)
     except ValueError:
         return datetime.max
+
+
+# --- Working hours priority logic ---
+def is_working_hours_priority_enabled(direction: Dict) -> bool:
+    return bool(direction.get("working_hours_priority_enabled", False))
+
+
+def apply_working_hours_priority(deals: List[Dict]) -> List[Dict]:
+    now = datetime.now()
+
+    if not (WORKING_HOURS_START <= now.hour < WORKING_HOURS_END):
+        return deals
+
+    fresh_threshold = now - timedelta(minutes=FRESH_LEAD_MINUTES)
+
+    fresh_deals: List[Dict] = []
+    regular_deals: List[Dict] = []
+
+    for deal in deals:
+        created_at = parse_datetime_value(str(deal.get("DATE_CREATE") or ""))
+
+        if created_at >= fresh_threshold:
+            fresh_deals.append(deal)
+        else:
+            regular_deals.append(deal)
+
+    return fresh_deals + regular_deals
 
 
 def update_deal_assignment_and_stage(deal_id: int, manager_id: int, next_stage_id: str) -> None:
@@ -628,11 +668,17 @@ def run_distribution_once(direction_name: str, selected_managers: List[str], bat
                 int(deal.get("ID") or 0),
             )
         )
+
+    if is_working_hours_priority_enabled(direction):
+        eligible_deals = apply_working_hours_priority(eligible_deals)
     target_deals = eligible_deals[: min(len(eligible_deals), max_for_batch)]
     manager_state = get_daily_manager_state(direction_name, available_managers, deal_types)
 
     results = []
     for deal in target_deals:
+        control_state = get_control_state(direction_name)
+        if not control_state.get("running"):
+            break
         deal_type = classify_deal_type(deal, source_map, logic)
         manager_name = select_manager_for_deal(deal_type, available_managers, manager_state, remaining_slots)
         manager_id = manager_ids[manager_name]
@@ -708,6 +754,7 @@ def login():
         session["user_role"] = user["role"]
         session["user_manager_id"] = user["manager_id"]
         session["user_direction"] = user.get("direction", "")
+        session.permanent = True
         return redirect(url_for("index"))
     return render_template("login.html")
 
@@ -798,6 +845,14 @@ def distribute_once_api():
 
     if not direction_name or not selected_managers:
         return jsonify({"status": "warning", "message": "Оберіть напрямок і менеджерів"}), 400
+
+    control_state = get_control_state(direction_name)
+    if not control_state.get("running"):
+        return jsonify({
+            "status": "info",
+            "message": "Розподіл зупинено або поставлено на паузу",
+            "summary": get_daily_summary(direction_name),
+        })
 
     try:
         result = run_distribution_once(direction_name, selected_managers, batch_size)
