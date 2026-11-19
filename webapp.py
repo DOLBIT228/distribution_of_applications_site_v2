@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import threading
+import time as time_module
 from functools import wraps
 from typing import Dict, List, Optional, Tuple
 
@@ -479,6 +480,10 @@ def init_db() -> None:
             )
             """
         )
+        control_columns = {row[1] for row in conn.execute("PRAGMA table_info(distribution_control_state)")}
+        if "batch_size" not in control_columns:
+            # Розмір пачки, з яким запустили розподіл: його використовує серверний цикл.
+            conn.execute("ALTER TABLE distribution_control_state ADD COLUMN batch_size INTEGER")
         conn.commit()
 
 
@@ -487,7 +492,7 @@ def get_control_state(direction_name: str) -> Dict:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         row = conn.execute(
             """
-            SELECT is_running, managers_json, updated_by, updated_at
+            SELECT is_running, managers_json, updated_by, updated_at, batch_size
             FROM distribution_control_state
             WHERE distribution_date = ? AND direction_name = ?
             """,
@@ -499,22 +504,36 @@ def get_control_state(direction_name: str) -> Dict:
         managers = json.loads(str(row[1] or "[]"))
     except json.JSONDecodeError:
         managers = []
-    return {"running": bool(int(row[0])), "managers": managers, "updated_by": row[2], "updated_at": row[3]}
+    return {
+        "running": bool(int(row[0])),
+        "managers": managers,
+        "updated_by": row[2],
+        "updated_at": row[3],
+        "batch_size": int(row[4]) if row[4] else None,
+    }
 
 
-def set_control_state(direction_name: str, running: bool, managers: List[str], updated_by: str) -> None:
+def set_control_state(
+    direction_name: str,
+    running: bool,
+    managers: List[str],
+    updated_by: str,
+    batch_size: int | None = None,
+) -> None:
+    """batch_size=None залишає збережений раніше розмір пачки."""
     distribution_date = date.today().isoformat()
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             """
             INSERT INTO distribution_control_state (
-                distribution_date, direction_name, is_running, managers_json, updated_by, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                distribution_date, direction_name, is_running, managers_json, updated_by, updated_at, batch_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(distribution_date, direction_name) DO UPDATE SET
                 is_running = excluded.is_running,
                 managers_json = excluded.managers_json,
                 updated_by = excluded.updated_by,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                batch_size = COALESCE(excluded.batch_size, distribution_control_state.batch_size)
             """,
             (
                 distribution_date,
@@ -523,6 +542,7 @@ def set_control_state(direction_name: str, running: bool, managers: List[str], u
                 json.dumps(managers, ensure_ascii=False),
                 updated_by,
                 datetime.utcnow().isoformat(),
+                int(batch_size) if batch_size else None,
             ),
         )
         conn.commit()
@@ -796,6 +816,80 @@ def run_distribution_once(direction_name: str, selected_managers: List[str], bat
     }
 
 
+# --- Серверний авто-розподіл ---
+# Раніше цикл крутився таймером у вкладці браузера. Телефон (Safari) присипляє вкладку,
+# тож заявки приходили лише при відкритті сторінки — одразу всією пачкою.
+# Тепер цикл працює на сервері й не залежить від того, чи відкрита сторінка.
+WORKER_TICK_SECONDS = 5
+_direction_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+_direction_locks_guard = threading.Lock()
+_last_run_by_direction: Dict[str, Dict] = {}
+_last_run_at: Dict[str, float] = {}
+
+
+def _lock_for_direction(direction_name: str) -> threading.Lock:
+    with _direction_locks_guard:
+        return _direction_locks[direction_name]
+
+
+def resolve_batch_size(direction_name: str, control_state: Dict) -> int:
+    direction = get_direction_config().get(direction_name, {})
+    return int(control_state.get("batch_size") or direction.get("batch_size") or DEFAULT_BATCH_SIZE)
+
+
+def run_distribution_for_direction(direction_name: str) -> Dict:
+    """Один прохід розподілу з менеджерами й пачкою, збереженими при старті.
+
+    Блокування не дає двом проходам (сервер + кнопка, кілька вкладок) розподілити
+    одну заявку двічі.
+    """
+    lock = _lock_for_direction(direction_name)
+    if not lock.acquire(blocking=False):
+        return {"status": "info", "message": "Розподіл уже виконується", "results": []}
+    try:
+        control_state = get_control_state(direction_name)
+        if not control_state.get("running"):
+            return {"status": "info", "message": "Розподіл зупинено або поставлено на паузу", "results": []}
+        managers = [str(m) for m in control_state.get("managers", [])]
+        batch_size = resolve_batch_size(direction_name, control_state)
+        try:
+            result = run_distribution_once(direction_name, managers, batch_size)
+        except Exception as exc:  # noqa: BLE001 — помилку показуємо в інтерфейсі, цикл не падає
+            result = {"status": "error", "message": f"Помилка розподілу: {exc}", "results": []}
+        result["finished_at"] = datetime.now().strftime("%H:%M:%S")
+        _last_run_by_direction[direction_name] = {k: v for k, v in result.items() if k != "results"}
+        return result
+    finally:
+        _last_run_at[direction_name] = time_module.monotonic()
+        lock.release()
+
+
+def get_last_run(direction_name: str) -> Dict:
+    return dict(_last_run_by_direction.get(direction_name) or {})
+
+
+def _auto_distribution_loop() -> None:
+    while True:
+        try:
+            directions = get_direction_config()
+            for direction_name, direction in directions.items():
+                if not get_control_state(direction_name).get("running"):
+                    continue
+                interval = max(5, int(direction.get("auto_interval_seconds") or 30))
+                last = _last_run_at.get(direction_name)
+                if last is not None and time_module.monotonic() - last < interval:
+                    continue
+                run_distribution_for_direction(direction_name)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[auto-distribution] {exc}", flush=True)
+        time_module.sleep(WORKER_TICK_SECONDS)
+
+
+def start_auto_distribution_worker() -> None:
+    thread = threading.Thread(target=_auto_distribution_loop, name="auto-distribution", daemon=True)
+    thread.start()
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -922,44 +1016,44 @@ def control_state_api():
         return jsonify({"status": "warning", "message": "Не задано напрямок"}), 400
     if direction_name not in get_accessible_directions_for_user():
         return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
-    return jsonify({"status": "success", "control": get_control_state(direction_name)})
+    return jsonify({
+        "status": "success",
+        "control": get_control_state(direction_name),
+        "last_run": get_last_run(direction_name),
+        "summary": get_daily_summary(direction_name),
+    })
 
 
 @app.post("/api/distribute-once")
 @login_required
 def distribute_once_api():
+    """Позачерговий прохід (той самий, що робить серверний цикл)."""
     payload = (request.get_json(silent=True) or {})
     direction_name = str(payload.get("direction", "")).strip()
-    selected_managers = [str(m) for m in payload.get("managers", [])]
-    directions = get_direction_config()
-    if direction_name not in directions:
+    if direction_name not in get_direction_config():
         return jsonify({"status": "warning", "message": "Вибраний напрямок не знайдено"}), 400
-    accessible_directions = get_accessible_directions_for_user()
-    if direction_name not in accessible_directions:
+    if direction_name not in get_accessible_directions_for_user():
         return jsonify({"status": "warning", "message": "У вас немає доступу до цього напрямку"}), 403
 
-    direction_batch = int(directions[direction_name].get("batch_size") or DEFAULT_BATCH_SIZE)
-    is_team_lead = session.get("user_role") == TEAM_LEAD_ROLE
-    batch_size = int(payload.get("batch_size", direction_batch)) if is_team_lead else direction_batch
-
-    if not direction_name or not selected_managers:
-        return jsonify({"status": "warning", "message": "Оберіть напрямок і менеджерів"}), 400
-
-    control_state = get_control_state(direction_name)
-    if not control_state.get("running"):
-        return jsonify({
-            "status": "info",
-            "message": "Розподіл зупинено або поставлено на паузу",
-            "summary": get_daily_summary(direction_name),
-        })
-
-    try:
-        result = run_distribution_once(direction_name, selected_managers, batch_size)
-    except Exception as exc:
-        return jsonify({"status": "error", "message": str(exc)}), 500
-
+    result = run_distribution_for_direction(direction_name)
     result["summary"] = get_daily_summary(direction_name)
     return jsonify(result)
+
+
+def _requested_batch_size(payload: Dict, direction_name: str) -> int:
+    direction_batch = int(get_direction_config().get(direction_name, {}).get("batch_size") or DEFAULT_BATCH_SIZE)
+    if session.get("user_role") != TEAM_LEAD_ROLE:
+        return direction_batch
+    try:
+        requested = int(payload.get("batch_size") or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    return requested if requested > 0 else direction_batch
+
+
+def _kick_distribution(direction_name: str) -> None:
+    """Перший прохід одразу після старту, не чекаючи наступного тіку циклу."""
+    threading.Thread(target=run_distribution_for_direction, args=(direction_name,), daemon=True).start()
 
 
 @app.post("/api/control")
@@ -977,8 +1071,21 @@ def control_api():
     if action in {"pause", "stop", "reconfigure"} and not reason:
         return jsonify({"status": "warning", "message": "Причина обов'язкова"}), 400
 
+    if direction_name not in get_direction_config():
+        return jsonify({"status": "warning", "message": "Вибраний напрямок не знайдено"}), 400
+
+    if action in {"start", "reconfigure"} and not selected_managers:
+        return jsonify({"status": "warning", "message": "Оберіть хоча б одного менеджера."}), 400
+
     if action == "start":
-        set_control_state(direction_name, True, selected_managers, str(session.get("user_name", "")))
+        set_control_state(
+            direction_name,
+            True,
+            selected_managers,
+            str(session.get("user_name", "")),
+            _requested_batch_size(payload, direction_name),
+        )
+        _kick_distribution(direction_name)
         managers_text = ", ".join(selected_managers) if selected_managers else "не обрано"
         send_chatbot_message(
             "\n".join(
@@ -1031,7 +1138,14 @@ def control_api():
         return jsonify({"status": "success", "message": "Авто-розподіл зупинено"})
 
     if action == "reconfigure":
-        set_control_state(direction_name, True, selected_managers, str(session.get("user_name", "")))
+        set_control_state(
+            direction_name,
+            True,
+            selected_managers,
+            str(session.get("user_name", "")),
+            _requested_batch_size(payload, direction_name),
+        )
+        _kick_distribution(direction_name)
         previous_managers = [str(m) for m in payload.get("previous_managers", [])]
         previous_text = ", ".join(previous_managers) if previous_managers else "не обрано"
         new_text = ", ".join(selected_managers) if selected_managers else "не обрано"
@@ -1107,4 +1221,5 @@ def clear_daily_api():
 
 if __name__ == "__main__":
     init_db()
+    start_auto_distribution_worker()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=False)
