@@ -392,21 +392,30 @@
       return data;
     }
 
+    // Розподіл виконує сервер; сторінка лише показує його стан.
+    // Тому розподіл не зупиняється, коли телефон блокує екран або вкладку закрито.
     async function runOnce(directionName = selectedDirection()) {
-      const directionState = getDirectionState(directionName);
-      const payload = {
-        direction: directionName,
-        batch_size: getBatchSizeValueForDirection(directionName),
-        managers: directionState.managersSnapshot,
-      };
-      setStatus('Виконується...');
       try {
-        const data = await postJson('/api/distribute-once', payload);
-        setStatus(data.message || 'Готово');
-        if (selectedDirection() === directionName) {
-          updateSummary(data.summary);
+        const query = new URLSearchParams({ direction: directionName });
+        const res = await fetch(`/api/control-state?${query.toString()}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+        const control = data.control || {};
+        const directionState = getDirectionState(directionName);
+        directionState.running = Boolean(control.running);
+        directionState.managersSnapshot = Array.isArray(control.managers) ? control.managers : [];
+        if (selectedDirection() !== directionName) return;
+        syncActionButtons();
+        updateSummary(data.summary);
+        const lastRun = data.last_run || {};
+        setCounts(lastRun.in_progress_counts);
+        if (!directionState.running) {
+          setStatus('Авто-розподіл не запущено.');
+        } else if (lastRun.message) {
+          setStatus(`${lastRun.message} (сервер, ${lastRun.finished_at || ''})`);
+        } else {
+          setStatus('Авто-розподіл працює на сервері.');
         }
-        setCounts(data.in_progress_counts);
       } catch (err) {
         setStatus(`Помилка: ${err.message}`);
       }
@@ -419,6 +428,7 @@
         direction: selectedDirection(),
         managers: selectedManagers(),
         previous_managers: previousManagers,
+        batch_size: getBatchSizeValue(),
       });
     }
 
@@ -443,10 +453,10 @@
       directionState.managersSnapshot = managers;
       directionState.running = true;
       syncActionButtons();
-      const interval = startDirectionTimer(directionName);
-      await runOnce(directionName);
+      startDirectionTimer(directionName);
       saveUiState();
-      setStatus(`Авто-розподіл увімкнено (кожні ${interval / 1000} сек).`);
+      setStatus(`Авто-розподіл увімкнено на сервері (кожні ${readIntervalSecondsForDirection(directionName)} сек). Сторінку можна закрити.`);
+      setTimeout(() => runOnce(directionName), 3000);
     }
 
     async function pauseAuto() {
@@ -585,6 +595,7 @@
       await syncControlStateFromServer(selectedDirection());
       syncActionButtons();
       saveUiState();
+      await runOnce(selectedDirection());
     });
     if (toggleManagerPanelBtn && managerPanel) {
       toggleManagerPanelBtn.addEventListener('click', () => {
@@ -625,12 +636,10 @@
       const runningDirections = Object.entries(autoStateByDirection)
         .filter(([, state]) => Boolean(state?.running))
         .map(([directionName]) => directionName);
-      runningDirections.forEach((directionName) => {
-        startDirectionTimer(directionName);
-        runOnce(directionName);
-      });
+      runningDirections.forEach((directionName) => startDirectionTimer(directionName));
+      await runOnce(selectedDirection());
       if (runningDirections.length > 0) {
-        setStatus(`Авто-розподіл відновлено для напрямків: ${runningDirections.join(', ')}.`);
+        setStatus(`Авто-розподіл працює на сервері для напрямків: ${runningDirections.join(', ')}.`);
       }
     })();
   </script>
